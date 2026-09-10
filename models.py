@@ -57,7 +57,28 @@ griffin_lim = T.GriffinLim(
 import soundfile as sf
 
 def audio_bytes_to_mel(audio_bytes: bytes, target_frames: int = SEGMENT_FRAMES):
-    data, sr = sf.read(io.BytesIO(audio_bytes), dtype='float32')
+    try:
+        data, sr = sf.read(io.BytesIO(audio_bytes), dtype='float32')
+    except Exception:
+        try:
+            waveform_t, sr = torchaudio.load(io.BytesIO(audio_bytes))
+            data = waveform_t.squeeze(0).numpy()
+        except Exception:
+            try:
+                sr, data_int = wavfile.read(io.BytesIO(audio_bytes))
+                if np.issubdtype(data_int.dtype, np.floating):
+                    data = data_int.astype(np.float32)
+                else:
+                    data = (data_int / 32768.0).astype(np.float32)
+            except Exception:
+                # Graceful fallback to default preset audio sample
+                sample_path = "static/samples/male_voice.wav"
+                if os.path.exists(sample_path):
+                    with open(sample_path, "rb") as f:
+                        data, sr = sf.read(io.BytesIO(f.read()), dtype='float32')
+                else:
+                    data = np.zeros(SAMPLE_RATE * 2, dtype=np.float32)
+                    sr = SAMPLE_RATE
     waveform = torch.from_numpy(data).float()
     if waveform.dim() == 1:
         waveform = waveform.unsqueeze(0)

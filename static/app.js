@@ -76,6 +76,53 @@ function handleFileSelect(model, input) {
   }
 }
 
+// Converts an AudioBuffer from the browser AudioContext into a true 16-bit PCM RIFF WAV Blob
+function audioBufferToWav(buffer, targetSampleRate = 22050) {
+  const channelData = buffer.getChannelData(0);
+  let samples;
+  if (buffer.sampleRate !== targetSampleRate) {
+    const ratio = buffer.sampleRate / targetSampleRate;
+    const newLen = Math.round(channelData.length / ratio);
+    samples = new Float32Array(newLen);
+    for (let i = 0; i < newLen; i++) {
+      samples[i] = channelData[Math.floor(i * ratio)] || 0;
+    }
+  } else {
+    samples = channelData;
+  }
+
+  const numSamples = samples.length;
+  const wavBuffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(wavBuffer);
+
+  const writeString = (v, offset, str) => {
+    for (let i = 0; i < str.length; i++) v.setUint8(offset + i, str.charCodeAt(i));
+  };
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+
+  return new Blob([view], { type: 'audio/wav' });
+}
+
 // Microphone Recording Handler
 async function toggleRecord(model) {
   const recState = state.recordings[model];
@@ -93,12 +140,24 @@ async function toggleRecord(model) {
         if (e.data.size > 0) recState.chunks.push(e.data);
       };
 
-      recState.mediaRecorder.onstop = () => {
-        const blob = new Blob(recState.chunks, { type: 'audio/wav' });
-        state.sources[model].blob = blob;
+      recState.mediaRecorder.onstop = async () => {
+        try {
+          const rawBlob = new Blob(recState.chunks, { type: recState.mediaRecorder.mimeType || 'audio/webm' });
+          const arrayBuffer = await rawBlob.arrayBuffer();
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          const audioCtx = new AudioContextClass();
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          const wavBlob = audioBufferToWav(audioBuffer, 22050);
+          state.sources[model].blob = wavBlob;
+          text.innerText = 'Recorded (PCM WAV ready)';
+        } catch (err) {
+          console.warn('Audio decoding fallback:', err);
+          const fallbackBlob = new Blob(recState.chunks, { type: 'audio/wav' });
+          state.sources[model].blob = fallbackBlob;
+          text.innerText = 'Recorded (ready)';
+        }
         stream.getTracks().forEach(track => track.stop());
         btn.classList.remove('recording');
-        text.innerText = 'Recorded (2s ready)';
         clearInterval(recState.timer);
       };
 
