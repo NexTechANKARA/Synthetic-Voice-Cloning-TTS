@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio – Voice Cloner</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Unbounded:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <a class="wordmark" href="studio.html">Voice Cloner</a>
+    <nav class="tabs" aria-label="Main"><a href="studio.html" aria-current="page">Studio</a><a href="results.html">Model results</a></nav>
+    <div class="top-actions"><span class="muted" id="who"></span><button type="button" class="btn-text" id="signout" style="color:var(--muted)">Sign out</button></div>
+  </header>
+
+  <section class="stage studio-stage" aria-label="Output" id="stage">
+    <canvas id="stage-canvas" aria-hidden="true"></canvas>
+    <span class="plus tl" aria-hidden="true">+</span><span class="plus tr" aria-hidden="true">+</span>
+    <div class="stage-bar">
+      <p class="status" id="status" role="status">Loading the voice models…</p>
+      <div class="player">
+        <span class="num small" id="time" style="opacity:.75">0:00</span>
+        <button type="button" class="play" id="play" aria-label="Play" disabled>
+          <svg id="icon-play" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
+          <svg id="icon-pause" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" hidden><rect x="3" y="2" width="3.5" height="12" rx="1" fill="currentColor"/><rect x="9.5" y="2" width="3.5" height="12" rx="1" fill="currentColor"/></svg>
+        </button>
+        <a class="dl" id="download" aria-disabled="true">Download WAV</a>
+      </div>
+    </div>
+  </section>
+  <audio id="audio" preload="auto"></audio>
+
+  <div class="workarea">
+    <section class="card script" aria-labelledby="script-h">
+      <h2 id="script-h">What should it say?</h2>
+      <label for="text" class="sr-only">Text to speak</label>
+      <textarea id="text" maxlength="1000" placeholder="Type a sentence, a message or a whole paragraph.">The meeting has been moved to Thursday afternoon. Please bring the signed forms with you.</textarea>
+      <div class="row">
+        <span class="small muted num" id="count"></span>
+        <label class="speed">Speed <input type="range" id="speed" min="0.75" max="1.33" step="0.01" value="1"> <span class="muted num" id="speed-out" style="width:44px">1.00×</span></label>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px 16px">
+        <button type="button" class="btn" id="speak" disabled style="min-width:160px">Speak<span class="bar" id="speak-bar"></span></button>
+        <span class="small muted" id="speak-hint">Loading the voice models…</span>
+      </div>
+      <p class="error" id="speak-error" role="alert" hidden></p>
+    </section>
+
+    <section class="card voices" aria-labelledby="voice-h">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:8px 8px 4px">
+        <h2 id="voice-h">Voice</h2><span class="small muted" id="selected"></span>
+      </div>
+      <label class="search">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" style="color:var(--muted);flex:none"><circle cx="7" cy="7" r="5.25"/><path d="M11 11l3.5 3.5"/></svg>
+        <span class="sr-only">Search voices</span>
+        <input type="search" id="query" placeholder="Search by name or accent" autocomplete="off">
+      </label>
+      <div role="group" aria-label="Filter voices" style="display:flex;gap:6px;padding:2px 4px 4px">
+        <button type="button" class="chip" data-g="all" aria-pressed="true">All</button>
+        <button type="button" class="chip" data-g="female" aria-pressed="false">Female</button>
+        <button type="button" class="chip" data-g="male" aria-pressed="false">Male</button>
+      </div>
+      <p class="group">Your voice</p>
+      <div id="mine"></div>
+      <p class="group" style="margin-top:8px">Built-in voices</p>
+      <div class="voice-list" id="list"></div>
+      <p class="small muted" id="no-results" hidden style="margin:8px">No voices match that search. Try a name like P226, or an accent like Scottish.</p>
+    </section>
+  </div>
+</div>
+
+<!-- add your voice -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="panel" id="panel" role="dialog" aria-modal="true" aria-labelledby="add-h" hidden>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+    <h2 id="add-h">Add your voice</h2>
+    <button type="button" class="close" id="close" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 2l10 10M12 2L2 12"/></svg></button>
+  </div>
+  <p class="muted">One person, a quiet room, 5 to 20 seconds. Your voice is made on this device for this visit only and never uploaded.</p>
+  <div class="seg" role="group" aria-label="How to add your voice">
+    <button type="button" id="tab-record" aria-pressed="true">Record</button>
+    <button type="button" id="tab-upload" aria-pressed="false">Upload a file</button>
+  </div>
+  <div id="pane-record" style="display:flex;flex-direction:column;gap:14px">
+    <p style="font-size:14px;font-weight:600">Read this out loud</p>
+    <blockquote class="passage">Hi there, this is my voice. I’m recording a short clip so the app can learn how I sound. Thanks for listening, and have a lovely day!</blockquote>
+    <p class="small muted">Say it the way you would to a friend. It takes about 8 seconds, so keep going with anything you like until the bar passes the line.</p>
+    <div style="display:flex;align-items:center;gap:16px">
+      <button type="button" class="rec" id="rec" aria-pressed="false"><span class="dot" aria-hidden="true"></span><span id="rec-label">Start recording</span></button>
+      <span class="small muted num" id="rec-time" aria-live="polite">0:00 / 0:20</span>
+    </div>
+    <div class="meter" aria-hidden="true"><span id="rec-bar"></span><i></i></div>
+    <p class="small muted" style="margin-top:-6px;padding-left:calc(25% - 24px)">5 s minimum</p>
+  </div>
+  <div id="pane-upload" hidden style="display:flex;flex-direction:column;gap:10px">
+    <label class="drop">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:var(--link)"><path d="M14 18V5M8.5 10.5L14 5l5.5 5.5M5 19v3.5h18V19"/></svg>
+      <span style="font-weight:600">Choose an audio file</span>
+      <span class="small muted">WAV, MP3, M4A or OGG, up to 20 MB. Any speech works.</span>
+      <input type="file" id="file" accept="audio/*" class="sr-only">
+    </label>
+    <p class="small" id="file-name" hidden></p>
+  </div>
+  <p class="error" id="clip-error" role="alert" hidden></p>
+  <ul class="checks" id="checks" hidden></ul>
+  <label class="check"><input type="checkbox" id="consent"><span>This is my voice, or I have permission from the person speaking.</span></label>
+  <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:8px">
+    <button type="button" class="btn" id="use" disabled>Use this voice</button>
+    <span class="small muted" id="use-hint" style="text-align:center">Record at least 5 seconds first</span>
+  </div>
+</aside>
+
+<script type="module" src="js/studio.js"></script>
+</body>
+</html>

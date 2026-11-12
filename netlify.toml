@@ -1,0 +1,17 @@
+# Netlify serves the static site in frontend/ (no build step).
+[build]
+  publish = "frontend"
+  command = ""
+
+# The model files are large and rarely change: let browsers keep them for a week.
+[[headers]]
+  for = "/models/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "microphone=(self), camera=(), geolocation=()"

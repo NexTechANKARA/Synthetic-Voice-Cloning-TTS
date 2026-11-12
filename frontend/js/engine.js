@@ -7,6 +7,8 @@
 //   const voice = await engine.embedClip(samples22k);                                         // 64 numbers
 
 const MODELS = ["tts_encoder", "tts_decoder", "diffusion", "vocoder", "voice_encoder"];
+// Every run gets fresh copies of its inputs: in worker mode ONNX Runtime moves the input memory to the worker.
+const f32 = (data, dims) => new ort.Tensor("float32", Float32Array.from(data), dims);
 
 export async function createEngine(base, { onProgress } = {}) {
   const cfg = await (await fetch(base + "pipeline.json")).json();
@@ -51,25 +53,33 @@ class Engine {
   }
 
   // ---------------------------------------------------------------- speaking
-  async speak(text, embedding, { speed = 1, seed = 0 } = {}) {
-    const spk = new ort.Tensor("float32", Float32Array.from(embedding), [1, 64]);
+  // Returns { audio: Float32Array at 22,050 Hz, mel: { data, T } (the phrases' spectrograms side by side) },
+  // or null when the text has no words to speak.
+  async speak(text, embedding, { speed = 1, seed = 0, onProgress } = {}) {
+    const spk = Float32Array.from(embedding);
     const pace = 1 / Math.min(Math.max(speed, 0.75), 1.33);
     const rand = gaussian(seed);
-    const pieces = [];
-    for (const [chunk, pause] of splitText(text, this.cfg.max_chars)) {
+    const pieces = [], mels = [], chunks = splitText(text, this.cfg.max_chars);
+    for (const [i, [chunk, pause]] of chunks.entries()) {
+      onProgress && onProgress(i, chunks.length);
       const mel = await this.textToMel(chunk, spk, pace, rand);
+      mels.push(mel);
       const wav = await this.vocode(mel);
       const t = trimSilence(wav, this.sr, 35);
       pieces.push(t.length > this.sr / 20 ? t : wav);
       if (pause) pieces.push(new Float32Array(Math.round(this.sr * 0.15)));
     }
-    return normalize(crossfade(pieces, Math.round(this.sr * 0.025)));
+    if (!mels.length) return null;
+    const T = mels.reduce((a, m) => a + m.T, 0), data = new Float32Array(80 * T);
+    let off = 0;
+    for (const m of mels) { for (let r = 0; r < 80; r++) data.set(m.data.subarray(r * m.T, (r + 1) * m.T), r * T + off); off += m.T; }
+    return { audio: normalize(crossfade(pieces, Math.round(this.sr * 0.025))), mel: { data, T } };
   }
 
   async textToMel(chunk, spk, pace, rand) {
     const ids = [...chunk].map((c) => BigInt(this.cfg.char2id[c] ?? this.cfg.unk_id));
     if (ids.length < 2) ids.push(BigInt(this.cfg.char2id[" "]));
-    const enc = await this.s.tts_encoder.run({ ids: new ort.Tensor("int64", BigInt64Array.from(ids), [1, ids.length]), spk });
+    const enc = await this.s.tts_encoder.run({ ids: new ort.Tensor("int64", BigInt64Array.from(ids), [1, ids.length]), spk: f32(spk, [1, 64]) });
     const h = enc.h.data, logd = enc.logd.data, L = ids.length, D = 256;
     // durations: frames per character = round(max(e^logd - 1, 0) * pace), at least 1 (FastSpeechTTS.predict_durations)
     const dur = Array.from(logd, (v) => Math.max(1, Math.round(Math.max(Math.exp(v) - 1, 0) * pace)));
@@ -77,7 +87,7 @@ class Engine {
     T = Math.max(T, 2);
     const x = new Float32Array(T * D);
     for (let i = 0, f = 0; i < L && f < T; i++) for (let k = 0; k < dur[i] && f < T; k++, f++) x.set(h.subarray(i * D, i * D + D), f * D);
-    const coarse = (await this.s.tts_decoder.run({ x: new ort.Tensor("float32", x, [1, T, D]), spk })).mel.data;   // (80, T)
+    const coarse = (await this.s.tts_decoder.run({ x: new ort.Tensor("float32", x, [1, T, D]), spk: f32(spk, [1, 64]) })).mel.data;   // (80, T)
     return this.refine(coarse, T, spk, rand);
   }
 
@@ -93,10 +103,9 @@ class Engine {
     let x = new Float32Array(n);
     const a0 = ab[tStart];
     for (let i = 0; i < n; i++) x[i] = Math.sqrt(a0) * cond[i] + Math.sqrt(1 - a0) * rand();
-    const condT = new ort.Tensor("float32", cond, [1, 1, 80, Tp]);
     for (let i = 0; i < ts.length; i++) {
       const a = ab[ts[i]], ap = i + 1 < ts.length ? ab[ts[i + 1]] : 1;
-      const eps = (await this.s.diffusion.run({ x: new ort.Tensor("float32", x, [1, 1, 80, Tp]), t: new ort.Tensor("int64", BigInt64Array.of(BigInt(ts[i])), [1]), cond: condT, spk })).eps.data;
+      const eps = (await this.s.diffusion.run({ x: f32(x, [1, 1, 80, Tp]), t: new ort.Tensor("int64", BigInt64Array.of(BigInt(ts[i])), [1]), cond: f32(cond, [1, 1, 80, Tp]), spk: f32(spk, [1, 64]) })).eps.data;
       const next = new Float32Array(n);
       for (let j = 0; j < n; j++) {
         const x0 = Math.min(1, Math.max(-1, (x[j] - Math.sqrt(1 - a) * eps[j]) / Math.sqrt(a)));
@@ -230,6 +239,14 @@ export function trimSilence(y, sr, topDb, keepMs = 60) {
 function speechLength(y, sr, topDb) {                          // seconds of non-silent audio (librosa.effects.split)
   const db = frameDb(y);
   return (db.filter((v) => v > -topDb).length * 512) / sr;
+}
+// Simple checks on a recording: how much speech, whether it clips, how loud the quiet parts are.
+export function clipChecks(y, sr) {
+  let peak = 0, clipped = 0;
+  for (const v of y) { const a = Math.abs(v); peak = Math.max(peak, a); if (a > 0.99) clipped++; }
+  const db = Array.from(frameDb(y)).sort((a, b) => a - b);
+  const floor = db.length ? db[Math.floor(db.length * 0.1)] : 0;        // the quietest tenth, relative to the loudest frame
+  return { speechSeconds: speechLength(y, sr, 30), clipped: clipped > sr * 0.01, noisy: floor > -30, silent: peak < 0.01 };
 }
 function crossfade(pieces, xf) {
   let out = new Float32Array(0);
