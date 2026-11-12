@@ -1,11 +1,10 @@
 # Uploads the backend and the models it needs to the Hugging Face Space, which then rebuilds itself.
-# Needs the repository secret HF_TOKEN (a Hugging Face token with write access).
+# Needs the repository secret HF_TOKEN (a Hugging Face token with write access) and a Hugging Face PRO
+# account (Docker Spaces on free CPU need PRO). Not used for now: the site runs the models in the browser
+# (frontend/models). Run it by hand from the Actions tab if the backend is ever needed.
 name: Deploy backend to Hugging Face
 
 on:
-  push:
-    branches: [main, "app/**"]
-    paths: ["backend/**", "vc_lib/**", "checkpoints/**", "data/**", ".github/workflows/deploy-backend.yml"]
   workflow_dispatch:
 
 jobs:
