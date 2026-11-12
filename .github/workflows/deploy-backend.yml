@@ -27,7 +27,13 @@ jobs:
           import os
           from huggingface_hub import HfApi
           api, space = HfApi(token=os.environ["HF_TOKEN"]), os.environ["SPACE"]
-          api.create_repo(space, repo_type="space", space_sdk="docker", exist_ok=True)
+          if not api.repo_exists(space, repo_type="space"):
+              try:
+                  api.create_repo(space, repo_type="space", space_sdk="docker")
+              except Exception as e:
+                  body = getattr(getattr(e, "response", None), "text", "")
+                  raise SystemExit(f"Hugging Face refused to create the Space: {e}\n{body}\n"
+                                   "Create it by hand at https://huggingface.co/new-space (SDK: Docker, hardware: CPU basic), then re-run.")
           api.upload_folder(
               repo_id=space, repo_type="space", folder_path=".",
               allow_patterns=["backend/*.py", "backend/requirements.txt", "vc_lib/*.py", "data/*.json",
