@@ -1,20 +1,21 @@
-# Virtual Environment
-.venv/
-venv/
-ENV/
-env/
+# training data (tens of GB) - rebuild with notebooks/00_data_prep.ipynb
+data/*
+!data/meta.json
+!data/speakers.json
 
-# Python cache & compiled files
+# only the checkpoints used by the app and the report are kept
+checkpoints/*_resume.pt
+checkpoints/vae_mu.pt
+checkpoints/collapsed*
+
+# generated audio and local files
+demo_output*.wav
+demo_outputs/
+voices/
+*.wav
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Submodules / external plugins
-ponytail/
-
-# OS / Editor files
-.DS_Store
-Thumbs.db
+*.pyc
 .vscode/
-.idea/
+.ipynb_checkpoints/
+desktop.ini
+.env
