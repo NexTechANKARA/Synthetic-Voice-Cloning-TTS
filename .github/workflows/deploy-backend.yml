@@ -1,0 +1,45 @@
+# Uploads the backend and the models it needs to the Hugging Face Space, which then rebuilds itself.
+# Needs the repository secret HF_TOKEN (a Hugging Face token with write access).
+name: Deploy backend to Hugging Face
+
+on:
+  push:
+    branches: [main, "app/**"]
+    paths: ["backend/**", "vc_lib/**", "checkpoints/**", "data/**", ".github/workflows/deploy-backend.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install huggingface_hub==0.26.5
+      - name: Upload to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE: ${{ vars.HF_SPACE || 'ANKARA-10/voice-cloner-api' }}
+          ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+        run: |
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+          api, space = HfApi(token=os.environ["HF_TOKEN"]), os.environ["SPACE"]
+          api.create_repo(space, repo_type="space", space_sdk="docker", exist_ok=True)
+          api.upload_folder(
+              repo_id=space, repo_type="space", folder_path=".",
+              allow_patterns=["backend/*.py", "backend/requirements.txt", "vc_lib/*.py", "data/*.json",
+                              "checkpoints/ae_best.pt", "checkpoints/vae_best.pt", "checkpoints/fastspeech_best.pt",
+                              "checkpoints/diffusion_best.pt", "checkpoints/gan_best.pt", "checkpoints/speaker_mean.pt"],
+              commit_message="Deploy from GitHub")
+          api.upload_file(repo_id=space, repo_type="space", path_or_fileobj="backend/Dockerfile", path_in_repo="Dockerfile")
+          api.upload_file(repo_id=space, repo_type="space", path_or_fileobj="backend/space_README.md", path_in_repo="README.md")
+          # public settings only: the Supabase publishable key is meant to be shared
+          api.add_space_variable(space, "SUPABASE_URL", "https://srkwbuufpamnkflhjazy.supabase.co")
+          api.add_space_variable(space, "SUPABASE_KEY", "sb_publishable_2exGRW7IQ4WuHVRZqKAuxg_Uh-uHBlT")
+          if os.environ.get("ALLOWED_ORIGINS"):
+              api.add_space_variable(space, "ALLOWED_ORIGINS", os.environ["ALLOWED_ORIGINS"])
+          print("Deployed to https://huggingface.co/spaces/" + space)
+          EOF
