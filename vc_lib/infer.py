@@ -8,7 +8,7 @@ import difflib
 import numpy as np
 import torch
 from .common import (device, paths, load_meta, tload, clean_text, encode_text, norm_wav, wav_to_mel,
-                     fit_frames, SR, SEG, HOP)
+                     fit_frames, SR, SEG, HOP, MAX_TEXT_LEN)
 from .train_ae import load_ae
 from .train_vae import load_vae
 from .train_transformer import load_transformer
@@ -39,6 +39,7 @@ def split_text(text, max_chars):
 
 MAX_FRAMES = 128        # the models were trained on 128-frame clips; past about 136 the decoder output decays into a hum
 CONTEXT_WORDS = 1       # neighbouring words spoken with each part (and cut away) so the joins sound continuous
+MAX_TEXT_CHARS = 240    # the text encoder's positional encoding covers 256 characters (window = chunk + context)
 CONTEXT_RESERVE = 56    # frames kept free for that context when a chunk is split (a window's first word is
                         # spoken longer, because the model puts the leading silence on it)
 
@@ -128,7 +129,7 @@ class VoicePipeline:
 
     @torch.no_grad()
     def _durations(self, text, speaker_emb, pace):
-        ids, mask = encode_text(text, self.meta["char2id"])
+        ids, mask = encode_text(text, self.meta["char2id"], max_len=len(text))   # no truncation: the full window
         ids, mask = torch.from_numpy(ids)[None].to(device), torch.from_numpy(mask)[None].to(device)
         h = self.tts.encode(ids, mask, speaker_emb[None])
         return self.tts.predict_durations(h, mask, pace)[0, :len(text)].tolist()
@@ -144,7 +145,7 @@ class VoicePipeline:
         segs = []
         for chunk, pause in chunks:
             dur = self._durations(chunk, speaker_emb, pace)
-            reserve = int(CONTEXT_RESERVE * max(pace, 1.0))         # slower speech: longer context words
+            reserve = min(int(CONTEXT_RESERVE * max(pace, 1.0)), limit // 2)   # slower speech: longer context words
             parts = split_by_frames(chunk, dur, limit - reserve) if sum(dur) > limit else [chunk]
             if len(parts) == 1:
                 segs.append((chunk, 0, sum(dur), pause, (False, False)))
@@ -182,6 +183,7 @@ class VoicePipeline:
             speaker_emb = self.speaker_mean[speaker or self.meta["train_speakers"][0]]
         speaker_emb = speaker_emb.to(device)
         max_chars = chunk_chars or (200 if self.kind == "fastspeech" else self.meta["chunk_chars"])   # length is handled in _plan
+        max_chars = min(max_chars, MAX_TEXT_CHARS)
         chunks = split_text(text, max_chars)
         if not chunks:
             return []
@@ -190,7 +192,8 @@ class VoicePipeline:
         else:
             segs = [(c, 0, None, pause, (False, False)) for c, pause in chunks]
         chunks = [(c, pause) for c, _, _, pause, _ in segs]
-        enc = [encode_text(c, self.meta["char2id"]) for c, _ in chunks]
+        max_len = max(MAX_TEXT_LEN, max(len(c) for c, _ in chunks))     # one length that holds every window
+        enc = [encode_text(c, self.meta["char2id"], max_len=max_len) for c, _ in chunks]
         ids = torch.from_numpy(np.stack([e[0] for e in enc])).to(device)
         mask = torch.from_numpy(np.stack([e[1] for e in enc])).to(device)
         spk = speaker_emb.unsqueeze(0).expand(len(chunks), -1).contiguous()

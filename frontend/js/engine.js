@@ -90,7 +90,7 @@ class Engine {
   // Returns [{ h, dur, fs, fe, jl, jr }]: the window's encoding, the frames to keep, and which sides are joins.
   async plan(chunk, spk, pace) {
     const sum = (a) => a.reduce((x, y) => x + y, 0);
-    const limit = this.cfg.max_frames || 128, ctxWords = 1, reserve = Math.floor(56 * Math.max(pace, 1));
+    const limit = this.cfg.max_frames || 128, ctxWords = 1, reserve = Math.min(Math.floor(56 * Math.max(pace, 1)), Math.floor(limit / 2));
     const enc = await this.encodeChunk(chunk, spk, pace);
     const dur = enc.dur.slice(0, chunk.length);
     const parts = sum(dur) > limit ? splitByFrames(chunk, dur, limit - reserve) : [chunk];
