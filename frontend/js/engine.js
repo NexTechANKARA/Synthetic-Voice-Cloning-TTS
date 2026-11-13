@@ -59,7 +59,7 @@ class Engine {
     const spk = Float32Array.from(embedding);
     const pace = 1 / Math.min(Math.max(speed, 0.75), 1.33);
     const rand = gaussian(seed);
-    const pieces = [], mels = [], chunks = splitText(text, this.cfg.max_chars);
+    const pieces = [], mels = [], chunks = splitText(text, Math.min(this.cfg.max_chars, 240));
     const hop = this.cfg.hop;
     for (const [i, [chunk, pause]] of chunks.entries()) {
       onProgress && onProgress(i, chunks.length);
@@ -260,7 +260,8 @@ export function splitByFrames(chunk, durations, limit) {
 export function splitText(text, maxChars) {
   const out = [];
   for (const phrase of text.trim().split(/(?<=[.,!?;:])\s+|\n+/)) {
-    const words = cleanText(phrase).split(" ").filter(Boolean);
+    // a word longer than maxChars is cut into pieces that fit (the text encoder has 256 positions)
+    const words = cleanText(phrase).split(" ").filter(Boolean).flatMap((w) => w.match(new RegExp(`.{1,${maxChars}}`, "g")));
     if (!words.length) continue;
     const chunks = [];
     let cur = "";

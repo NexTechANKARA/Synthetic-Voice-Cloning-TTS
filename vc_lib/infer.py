@@ -8,7 +8,7 @@ import difflib
 import numpy as np
 import torch
 from .common import (device, paths, load_meta, tload, clean_text, encode_text, norm_wav, wav_to_mel,
-                     fit_frames, SR, SEG, HOP, MAX_TEXT_LEN)
+                     fit_frames, SR, SEG, HOP)
 from .train_ae import load_ae
 from .train_vae import load_vae
 from .train_transformer import load_transformer
@@ -22,7 +22,7 @@ def split_text(text, max_chars):
     Returns [(chunk_text, pause_after)]."""
     out = []
     for phrase in re.split(r"(?<=[.,!?;:])\s+|\n+", text.strip()):
-        words = clean_text(phrase).split()
+        words = [w[i:i + max_chars] for w in clean_text(phrase).split() for i in range(0, len(w), max_chars)]
         if not words:
             continue
         chunks, cur = [], ""
@@ -128,11 +128,13 @@ class VoicePipeline:
         return self.vae.encode(x)[0].mean(0)
 
     @torch.no_grad()
-    def _durations(self, text, speaker_emb, pace):
-        ids, mask = encode_text(text, self.meta["char2id"], max_len=len(text))   # no truncation: the full window
+    def _encode(self, text, speaker_emb, pace):
+        """Encoder output (1, L, D) and predicted frames per character for `text`, at its own length (no
+        padding, so the durations are exactly the ones the plan is built on)."""
+        ids, mask = encode_text(text, self.meta["char2id"], max_len=len(text))
         ids, mask = torch.from_numpy(ids)[None].to(device), torch.from_numpy(mask)[None].to(device)
         h = self.tts.encode(ids, mask, speaker_emb[None])
-        return self.tts.predict_durations(h, mask, pace)[0, :len(text)].tolist()
+        return h, self.tts.predict_durations(h, mask, pace)[0].tolist()
 
     @torch.no_grad()
     def _plan(self, chunks, speaker_emb, pace, limit=MAX_FRAMES):
@@ -141,14 +143,14 @@ class VoicePipeline:
         spoken together with up to CONTEXT_WORDS neighbouring words on each side, and only the part's own
         frames are kept (cut in the middle of the word gaps), so a join sounds like the middle of a sentence
         rather than the end of one and the start of another.
-        Returns [(window_text, frame_start, frame_end, pause_after, (joined_left, joined_right))]."""
+        Returns [(window_text, frame_start, frame_end, pause_after, (joined_left, joined_right), (h, durations))]."""
         segs = []
         for chunk, pause in chunks:
-            dur = self._durations(chunk, speaker_emb, pace)
+            h, dur = self._encode(chunk, speaker_emb, pace)
             reserve = min(int(CONTEXT_RESERVE * max(pace, 1.0)), limit // 2)   # slower speech: longer context words
             parts = split_by_frames(chunk, dur, limit - reserve) if sum(dur) > limit else [chunk]
             if len(parts) == 1:
-                segs.append((chunk, 0, sum(dur), pause, (False, False)))
+                segs.append((chunk, 0, sum(dur), pause, (False, False), (h, dur)))
                 continue
             words, a = chunk.split(" "), 0
             for i, part in enumerate(parts):
@@ -157,7 +159,7 @@ class VoicePipeline:
                 while True:
                     ws = words[a - cl:a + n + cr]
                     window = " ".join(ws)
-                    wdur = self._durations(window, speaker_emb, pace)
+                    wh, wdur = self._encode(window, speaker_emb, pace)
                     if sum(wdur) <= limit or cl + cr == 0:
                         break
                     if cl >= cr: cl -= 1                      # too long: give up context, largest side first
@@ -171,7 +173,7 @@ class VoicePipeline:
                 fs = sum(wdur[:cs - 1]) + wdur[cs - 1] // 2 if cl else 0           # middle of the gap before
                 fe = sum(wdur[:ce]) + wdur[ce] // 2 if cr else sum(wdur)            # middle of the gap after
                 # a side that lost its context is a plain cut: it gets trimmed like a chunk end
-                segs.append((window, fs, fe, pause and i == len(parts) - 1, (cl > 0, cr > 0)))
+                segs.append((window, fs, fe, pause and i == len(parts) - 1, (cl > 0, cr > 0), (wh, wdur)))
                 a += n
         return segs
 
@@ -189,29 +191,29 @@ class VoicePipeline:
             return []
         if self.kind == "fastspeech":
             segs = self._plan(chunks, speaker_emb, pace)
+            # decode every window with exactly the durations the plan was built on (no padding in the encoder)
+            T = max(min(sum(d), 1024) for *_, (_, d) in segs)
+            T += (-T) % 4                                      # the diffusion U-Net halves time twice
+            coarse, lengths = [], []
+            for *_, (h, d) in segs:
+                d = torch.tensor([d], device=device, dtype=torch.long)
+                m, fm = self.tts.decode(h, d, speaker_emb[None], max_len=T)
+                coarse.append(m); lengths.append(int(fm.sum()))
+            coarse = torch.cat(coarse).unsqueeze(1)            # (N, 1, 80, T), silence after each window
         else:
-            segs = [(c, 0, None, pause, (False, False)) for c, pause in chunks]
-        chunks = [(c, pause) for c, _, _, pause, _ in segs]
-        max_len = max(MAX_TEXT_LEN, max(len(c) for c, _ in chunks))     # one length that holds every window
-        enc = [encode_text(c, self.meta["char2id"], max_len=max_len) for c, _ in chunks]
-        ids = torch.from_numpy(np.stack([e[0] for e in enc])).to(device)
-        mask = torch.from_numpy(np.stack([e[1] for e in enc])).to(device)
-        spk = speaker_emb.unsqueeze(0).expand(len(chunks), -1).contiguous()
-        if self.kind == "fastspeech":
-            coarse, lengths = self.tts.infer(ids, mask, spk, pace=pace)
-            T = coarse.size(-1)
-            pad = (-T) % 4                                     # the diffusion U-Net halves time twice
-            if pad:
-                coarse = torch.nn.functional.pad(coarse, (0, pad))
-        else:
-            coarse = self.tts(ids, mask, spk)
-            lengths = torch.full((len(chunks),), coarse.size(-1), device=device)
+            segs = [(c, 0, None, pause, (False, False), None) for c, pause in chunks]
+            enc = [encode_text(c, self.meta["char2id"]) for c, _ in chunks]
+            ids = torch.from_numpy(np.stack([e[0] for e in enc])).to(device)
+            mask = torch.from_numpy(np.stack([e[1] for e in enc])).to(device)
+            coarse = self.tts(ids, mask, speaker_emb.unsqueeze(0).expand(len(chunks), -1).contiguous())
+            lengths = [coarse.size(-1)] * len(chunks)
+        spk = speaker_emb.unsqueeze(0).expand(len(segs), -1).contiguous()
         strength = self.strength if self.kind == "fastspeech" else 1.0
         mel = ddim_sample(self.diff, self.sched, coarse, spk, self.steps, self.cfg, seed=seed, strength=strength) \
             if self.use_diffusion else coarse
         out = []
-        for j, (_, fs, fe, has_pause, joined) in enumerate(segs):
-            n = int(lengths[j])
+        for j, (_, fs, fe, has_pause, joined, _) in enumerate(segs):
+            n = lengths[j]
             fe = n if fe is None else min(fe, n)
             out.append((mel[j, 0, :, fs:fe].float().cpu().numpy(), has_pause, joined))
         return out
