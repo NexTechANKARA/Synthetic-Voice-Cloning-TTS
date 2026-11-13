@@ -104,7 +104,7 @@ def main():
               for s in meta["train_speakers"] + meta["holdout"] if s in speaker_mean]
     cfg = {
         "sample_rate": SR, "n_fft": N_FFT, "hop": HOP, "n_mels": N_MELS, "seg": SEG,
-        "db_range": meta["db_range"], "char2id": meta["char2id"], "unk_id": 1, "max_chars": 50, "max_frames": infer.MAX_FRAMES,
+        "db_range": meta["db_range"], "char2id": meta["char2id"], "unk_id": 1, "max_chars": 200, "max_frames": infer.MAX_FRAMES,
         "diffusion": {"T": sched.T, "alpha_bar": [float(a) for a in sched.alpha_bar.cpu()], "strength": 0.1, "steps": 50},
         "mel_basis": np.round(librosa.filters.mel(sr=SR, n_fft=N_FFT, n_mels=N_MELS), 7).tolist(),
         "voices": voices,
