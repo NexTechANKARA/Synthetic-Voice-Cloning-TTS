@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Unbounded:wght@500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<script src="js/theme.js"></script>
 <script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
@@ -18,7 +19,7 @@
   <header class="top">
     <a class="wordmark" href="studio.html">Voice Cloner</a>
     <nav class="tabs" aria-label="Main"><a href="studio.html" aria-current="page">Studio</a><a href="results.html">Model results</a></nav>
-    <div class="top-actions"><span class="muted" id="who"></span><button type="button" class="btn-text" id="signout" style="color:var(--muted)">Sign out</button></div>
+    <div class="top-actions"><div class="theme"></div><span class="muted" id="who"></span><button type="button" class="btn-text" id="signout" style="color:var(--muted)">Sign out</button></div>
   </header>
 
   <section class="stage studio-stage" aria-label="Output" id="stage">

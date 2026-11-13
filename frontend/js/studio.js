@@ -136,6 +136,9 @@ audio.onended = () => { S.phase = "idle"; $("time").textContent = `${fmt(S.durat
 $("play").onclick = () => { if (S.phase === "playing") { audio.pause(); S.phase = "idle"; render(); } else if (S.hasAudio) { audio.play(); S.phase = "playing"; render(); } };
 
 // ---------------------------------------------------------------- the page's words and buttons
+function loadingText() {
+  return S.loadFraction >= 1 ? "Getting the voice models ready…" : `Loading the voice models… ${Math.round(S.loadFraction * 100)}%`;
+}
 function render() {
   const empty = !text.value.trim(), v = S.engine ? selectedVoice() : null;
   $("count").textContent = `${text.value.length} of 1000 characters`;
@@ -146,10 +149,10 @@ function render() {
   btn.classList.toggle("busy", speaking);
   btn.firstChild.textContent = speaking ? "Speaking…" : "Speak";
   $("speak-hint").textContent = S.loadError ? "Couldn’t download the voice models. Check your connection and reload the page."
-    : !S.engine ? `Loading the voice models… ${Math.round(S.loadFraction * 100)}%`
+    : !S.engine ? loadingText()
     : empty ? "Type something to speak" : speaking ? "Making the audio on this device" : `Voice: ${v.label}${v.info ? " (" + v.info + ")" : ""}. Ctrl + Enter also speaks.`;
   $("status").textContent = S.loadError ? "Couldn’t download the voice models."
-    : !S.engine ? `Loading the voice models… ${Math.round(S.loadFraction * 100)}%`
+    : !S.engine ? loadingText()
     : S.phase === "recording" ? `Listening… ${Math.floor((performance.now() - S.recStart) / 1000)} s`
     : $("panel").hidden === false ? "Your recording will show here."
     : speaking ? `Speaking in ${v.label}…` : playing ? `Playing ${v.label}`

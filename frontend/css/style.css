@@ -1,4 +1,5 @@
-/* Voice Cloner: one stylesheet for every page. Colours follow the device's light or dark setting. */
+/* Voice Cloner: one stylesheet for every page. js/theme.js sets data-theme on <html> to "light" or "dark"
+   (from the visitor's choice, or the device's setting when the choice is Auto). */
 :root {
   --page: #F2F6F1; --surface: #FFFFFF; --sunken: #DBE7D7; --stage: #0A1F19;
   --ink: #0E1F1A; --muted: #56685F; --on-accent: #FFFFFF; --link: #135E4B;
@@ -9,16 +10,20 @@
   --body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page: #0B1512; --surface: #13201B; --sunken: #1C2C25; --stage: #050D0A;
-    --ink: #F2F6F1; --muted: #9DB3A8; --on-accent: #0B1512; --link: #7FD49B;
-    --line: #24362E; --grid: #1E2E27; --strong: #F2F6F1; --accent: #4CB572; --soft: #16382D;
-    --error: #FF8A80; --rec: #FF5A4F;
-    --c1: #2E9A6E; --c2: #C8782A; --c3: #6683D6;
-    color-scheme: dark;
-  }
+:root[data-theme="dark"] {
+  --page: #0B1512; --surface: #13201B; --sunken: #1C2C25; --stage: #050D0A;
+  --ink: #F2F6F1; --muted: #9DB3A8; --on-accent: #0B1512; --link: #7FD49B;
+  --line: #24362E; --grid: #1E2E27; --strong: #F2F6F1; --accent: #4CB572; --soft: #16382D;
+  --error: #FF8A80; --rec: #FF5A4F;
+  --c1: #2E9A6E; --c2: #C8782A; --c3: #6683D6;
+  color-scheme: dark;
 }
+
+/* the Auto / Light / Dark switch */
+.theme { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--sunken); }
+.theme button { display: grid; place-items: center; width: 34px; height: 30px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); }
+.theme button[aria-pressed="true"] { background: var(--surface); color: var(--ink); }
+.theme svg { width: 16px; height: 16px; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
