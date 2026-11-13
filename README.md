@@ -65,6 +65,8 @@ sf.write("mine.wav", pipe.synthesize("Hello, this is my voice.", speaker_emb=emb
 | `tests/smoke_test.py` | End-to-end test on synthetic data (`python tests/smoke_test.py`) |
 | `data/meta.json`, `data/speakers.json` | Settings and speaker list the models need |
 | `checkpoints/` | Trained models |
+| `backend/` | Voice Cloner web app: API for the models (Hugging Face Space) |
+| `frontend/` | Voice Cloner web app: the website (Netlify) |
 
 ## Training from scratch
 

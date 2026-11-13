@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Cloner</title>
+<meta name="description" content="Type anything and hear it in one of 80 voices, or in your own from a short recording.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Unbounded:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="js/theme.js"></script>
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+</head>
+<body class="waiting">
+<div class="auth">
+  <section class="stage" id="stage" aria-label="Voice Cloner">
+    <canvas id="stage-canvas" aria-hidden="true"></canvas>
+    <p class="brand">Voice Cloner</p>
+    <div class="pitch">
+      <h2>Say it in your voice.</h2>
+      <p>Type anything and hear it in one of 80 voices, or in yours from a 7-second recording.</p>
+    </div>
+    <span class="plus bl" aria-hidden="true">+</span><span class="plus br" aria-hidden="true">+</span>
+  </section>
+
+  <main class="fade-in">
+    <div class="form-wrap">
+
+      <!-- sign in / create account -->
+      <div id="view-auth" style="display:flex;flex-direction:column;gap:22px">
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <h1 id="auth-title">Welcome back</h1>
+          <p class="muted" id="auth-lead">Sign in to use the Studio.</p>
+        </div>
+        <button type="button" class="btn-outline" id="google" style="width:100%;padding:14px 20px;font-size:15px">Continue with Google</button>
+        <div class="or" aria-hidden="true">or with email</div>
+        <form id="auth-form" novalidate style="display:flex;flex-direction:column;gap:16px">
+          <div class="field">
+            <label for="email">Email</label>
+            <input class="input" id="email" type="email" autocomplete="email" aria-describedby="email-err" required>
+            <span class="error" id="email-err" hidden></span>
+          </div>
+          <div class="field">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <label for="password">Password</label>
+              <button type="button" class="btn-text small" id="forgot">Forgot password?</button>
+            </div>
+            <div class="pass">
+              <input class="input" id="password" type="password" autocomplete="current-password" aria-describedby="pass-help" required>
+              <button type="button" class="show" aria-pressed="false">Show</button>
+            </div>
+            <span class="small muted" id="pass-help"></span>
+          </div>
+          <p class="error" id="auth-error" role="alert" hidden></p>
+          <button type="submit" class="btn" id="submit">Sign in</button>
+        </form>
+        <p class="muted"><span id="switch-text">New here?</span> <button type="button" class="btn-text" id="switch" style="font-size:15px">Create an account</button></p>
+      </div>
+
+      <!-- forgot password -->
+      <div id="view-reset" hidden style="display:flex;flex-direction:column;gap:18px">
+        <h1>Reset your password</h1>
+        <p class="muted">Enter your email and we’ll send you a link to choose a new password.</p>
+        <form id="reset-form" novalidate style="display:flex;flex-direction:column;gap:16px">
+          <div class="field"><label for="reset-email">Email</label><input class="input" id="reset-email" type="email" autocomplete="email" required></div>
+          <p class="error" id="reset-error" role="alert" hidden></p>
+          <button type="submit" class="btn">Send reset link</button>
+        </form>
+        <button type="button" class="btn-text back" style="align-self:flex-start">Back to sign in</button>
+      </div>
+
+      <!-- choose a new password (after the reset link) -->
+      <div id="view-newpass" hidden style="display:flex;flex-direction:column;gap:18px">
+        <h1>Choose a new password</h1>
+        <form id="newpass-form" novalidate style="display:flex;flex-direction:column;gap:16px">
+          <div class="field">
+            <label for="newpass">New password</label>
+            <input class="input" id="newpass" type="password" autocomplete="new-password" aria-describedby="newpass-help" required>
+            <span class="small muted" id="newpass-help">At least 8 characters.</span>
+          </div>
+          <p class="error" id="newpass-error" role="alert" hidden></p>
+          <button type="submit" class="btn">Save password</button>
+        </form>
+      </div>
+
+      <!-- messages -->
+      <div id="view-message" hidden role="status" style="display:flex;flex-direction:column;gap:14px">
+        <h1 id="msg-title"></h1>
+        <p class="muted" id="msg-text"></p>
+        <a class="btn" id="msg-action" href="studio.html" style="align-self:flex-start" hidden>Open the Studio</a>
+        <button type="button" class="btn-text back" id="msg-back" style="align-self:flex-start" hidden>Back to sign in</button>
+      </div>
+
+      <div class="foot">
+        <p>Your email is used only to sign you in. The text you type and the voices you add never leave your device.</p>
+        <p>Just curious? <a href="results.html" style="font-weight:600">See how the models were trained</a> without an account.</p>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:4px"><span>Theme</span><div class="theme"></div></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="intro" id="intro" hidden>
+  <canvas id="intro-canvas" aria-hidden="true"></canvas>
+  <div class="counter" id="counter" aria-hidden="true"></div>
+  <p class="status" id="intro-status" role="status">Loading the page</p>
+  <button type="button" class="skip" id="skip">Skip</button>
+</div>
+
+<script type="module" src="js/signin.js"></script>
+</body>
+</html>

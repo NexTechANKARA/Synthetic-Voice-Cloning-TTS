@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model results – Voice Cloner</title>
+<meta name="description" content="How the five Voice Cloner models were trained, with their training curves and evaluation.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Unbounded:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="js/theme.js"></script>
+</head>
+<body>
+<div class="page" style="gap:28px">
+  <header class="top">
+    <a class="wordmark" href="studio.html">Voice Cloner</a>
+    <nav class="tabs" aria-label="Main"><a href="studio.html">Studio</a><a href="results.html" aria-current="page">Model results</a></nav>
+    <div class="top-actions"><div class="theme"></div><a href="index.html" style="font-weight:600">Sign in</a></div>
+  </header>
+
+  <section style="display:flex;flex-direction:column;gap:12px;max-width:760px;padding-top:16px">
+    <h1 style="font-size:clamp(32px,4vw,48px);line-height:1.1;letter-spacing:-0.03em">Model results</h1>
+    <p class="lead">Five models trained from scratch on 80 voices from the VCTK dataset, on one RTX 4070. Every number on this page comes from the training logs and the evaluation runs.</p>
+  </section>
+
+  <section class="tiles" aria-label="Headline numbers">
+    <div class="tile"><span class="label">Word error rate</span><span class="value">0.083</span><span class="note">Down from 0.960 in the original design</span></div>
+    <div class="tile"><span class="label">Voice similarity</span><span class="value">0.744</span><span class="note">0.581 for a voice never heard in training</span></div>
+    <div class="tile"><span class="label">Speaker accuracy</span><span class="value">98.6%</span><span class="note">The voice model telling 76 speakers apart</span></div>
+    <div class="tile"><span class="label">All five models</span><span class="value">39 MB</span><span class="note">Small enough to run in your browser</span></div>
+  </section>
+
+  <section class="card" aria-labelledby="curves-h" style="display:flex;flex-direction:column;gap:18px">
+    <div class="row" style="align-items:baseline">
+      <h2 id="curves-h" style="font-size:22px">Training curves</h2>
+      <div class="seg" role="group" aria-label="View" style="min-width:200px">
+        <button type="button" id="view-chart" aria-pressed="true">Chart</button><button type="button" id="view-table" aria-pressed="false">Table</button>
+      </div>
+    </div>
+    <div role="group" aria-label="Model" id="models" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+    <p class="muted" id="curve-note" style="font-size:15px;max-width:760px"></p>
+    <div id="curve-chart">
+      <div class="legend" id="curve-legend"></div>
+      <div class="chart" id="curve" style="margin-top:12px"></div>
+    </div>
+    <div class="table-wrap" id="curve-table" hidden></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card" aria-labelledby="cmp-h" style="display:flex;flex-direction:column;gap:18px">
+      <h2 id="cmp-h">Original design against final</h2>
+      <div class="legend"><span><i class="sq" style="background:var(--c2)"></i>Original (fixed-slot Transformer)</span><span><i class="sq" style="background:var(--c1)"></i>Final (FastSpeech-style)</span></div>
+      <div class="pairs" id="pairs"></div>
+      <p class="small muted" style="font-size:14px">On 30 validation phrases the generated speech scores a word error rate of 0.119, against 0.172 for the real recordings of the same phrases.</p>
+    </section>
+
+    <section class="card" aria-labelledby="drop-h" style="display:flex;flex-direction:column;gap:16px">
+      <h2 id="drop-h">How far validation loss fell</h2>
+      <p class="muted" style="font-size:14px">From the first epoch to the last. Each model uses its own loss, so compare a model only with itself.</p>
+      <div class="bars" id="drops"></div>
+    </section>
+
+    <section class="card" aria-labelledby="str-h" style="display:flex;flex-direction:column;gap:14px">
+      <h2 id="str-h">Diffusion strength and word errors</h2>
+      <p class="muted" style="font-size:14px">The more the diffusion model may change the spectrogram, the more words go wrong. The app uses strength 0.1.</p>
+      <div class="legend"><span><i style="background:var(--c1)"></i>Original diffusion (used)</span><span><i style="background:var(--c2)"></i>Retrained on predicted timing</span></div>
+      <div class="chart" id="strength"></div>
+      <p class="small muted">Strength 0 means no diffusion; 1 means rebuilding the spectrogram from pure noise. Word error rate from Whisper on 7 test sentences.</p>
+    </section>
+
+    <section class="card" aria-labelledby="size-h" style="display:flex;flex-direction:column;gap:16px">
+      <h2 id="size-h">Where the 39 MB goes</h2>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:28px" id="donut"></div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="all-h" style="display:flex;flex-direction:column;gap:16px">
+    <h2 id="all-h" style="font-size:22px">All training losses</h2>
+    <div class="table-wrap" id="all"></div>
+    <p class="small muted">The app uses each model’s checkpoint with the lowest validation loss: autoencoder epoch 50, speaker VAE 76, FastSpeech 52, diffusion 40, vocoder 70.</p>
+  </section>
+</div>
+<script type="module" src="js/results.js"></script>
+</body>
+</html>
