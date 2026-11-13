@@ -1,6 +1,18 @@
 // Model results: charts drawn as SVG from data/results.json and the evaluation numbers below.
 const $ = (id) => document.getElementById(id);
-const { curves } = await (await fetch("data/results.json")).json();
+let curves = null;
+async function loadCurves() {
+  try {
+    const res = await fetch("data/results.json");
+    if (!res.ok) throw new Error(res.status);
+    curves = (await res.json()).curves;
+    $("curve-note").textContent = "";
+    initCurves();
+  } catch {
+    $("curve-note").innerHTML = 'Couldn’t load the training history. <button type="button" class="btn-text" id="retry">Try again</button>';
+    $("retry").onclick = loadCurves;
+  }
+}
 const ORDER = ["ae", "vae", "fs", "diff", "gan", "base"];
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmt = (v) => (v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(3) : v.toFixed(4));
@@ -16,10 +28,13 @@ function niceTicks(lo, hi, n) {
 // ---------------------------------------------------------------- training curves
 const S = { model: "fs", view: "chart" };
 const X0 = 56, X1 = 710, Y0 = 12, Y1 = 268;
-$("models").innerHTML = ORDER.map((k) => `<button type="button" class="chip" data-k="${k}">${esc(curves[k].label)}</button>`).join("");
-$("models").onclick = (e) => { const b = e.target.closest("button"); if (b) { S.model = b.dataset.k; drawCurves(); } };
-$("view-chart").onclick = () => { S.view = "chart"; drawCurves(); };
-$("view-table").onclick = () => { S.view = "table"; drawCurves(); };
+function initCurves() {
+  $("models").innerHTML = ORDER.map((k) => `<button type="button" class="chip" data-k="${k}">${esc(curves[k].label)}</button>`).join("");
+  $("models").onclick = (e) => { const b = e.target.closest("button"); if (b) { S.model = b.dataset.k; drawCurves(); } };
+  $("view-chart").onclick = () => { S.view = "chart"; drawCurves(); };
+  $("view-table").onclick = () => { S.view = "table"; drawCurves(); };
+  drawCurves();
+}
 
 function drawCurves() {
   const m = curves[S.model], n = m.train.length;
@@ -45,7 +60,7 @@ function drawCurves() {
     ${xt.map((e) => `<text x="${sx(e)}" y="292" text-anchor="middle" font-size="12" fill="var(--muted)">${e}</text>`).join("")}
     ${(m.marks || []).map((k) => `<line x1="${sx(k.epoch)}" x2="${sx(k.epoch)}" y1="${Y0}" y2="${Y1}" stroke="var(--muted)" stroke-dasharray="3 4"/><text x="${sx(k.epoch) + 6}" y="24" font-size="12" fill="var(--muted)">${esc(k.label)}</text>`).join("")}
     ${series.map((s, i) => `<path d="M${s.v.map((v, j) => `${sx(j + 1).toFixed(1)} ${sy(v).toFixed(1)}`).join("L")}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><text x="718" y="${ly[i]}" font-size="12" fill="var(--ink)">${fmt(s.v[n - 1])}</text>`).join("")}
-    <g id="hover" hidden><line id="hl" y1="${Y0}" y2="${Y1}" stroke="var(--ink)" stroke-opacity=".35"/>${series.map((s, i) => `<circle id="hd${i}" r="4.5" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`).join("")}</g>
+    <g id="hover" style="display:none"><line id="hl" y1="${Y0}" y2="${Y1}" stroke="var(--ink)" stroke-opacity=".35"/>${series.map((s, i) => `<circle id="hd${i}" r="4.5" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`).join("")}</g>
     <rect x="${X0}" y="${Y0}" width="${X1 - X0}" height="${Y1 - Y0}" fill="transparent"/></svg><div class="tip" id="tip" hidden></div>`;
   const box = $("curve");
   box.innerHTML = svg;
@@ -54,15 +69,15 @@ function drawCurves() {
     const r = el.getBoundingClientRect(), x = ((e.clientX - r.left) / r.width) * 800;
     if (x < X0 - 10 || x > X1 + 10) return el.onmouseleave();
     const ep = Math.min(n, Math.max(1, Math.round(((x - X0) / (X1 - X0)) * (n - 1)) + 1)), hx = sx(ep);
-    $("hover").hidden = false; $("hl").setAttribute("x1", hx); $("hl").setAttribute("x2", hx);
+    $("hover").style.display = ""; $("hl").setAttribute("x1", hx); $("hl").setAttribute("x2", hx);
     series.forEach((s, i) => { $("hd" + i).setAttribute("cx", hx); $("hd" + i).setAttribute("cy", sy(s.v[ep - 1])); });
     const tip = $("tip");
     tip.innerHTML = `<div style="font-weight:600">Epoch ${ep}</div>${series.map((s) => `<div>${esc(s.name)}: ${fmt(s.v[ep - 1])}</div>`).join("")}`;
     tip.hidden = false; tip.style.left = `${(hx / 800) * 100}%`; tip.style.transform = hx > 560 ? "translateX(calc(-100% - 12px))" : "translateX(12px)";
   };
-  el.onmouseleave = () => { $("hover").hidden = true; $("tip").hidden = true; };
+  el.onmouseleave = () => { $("hover").style.display = "none"; $("tip").hidden = true; };
 }
-drawCurves();
+loadCurves();
 
 // ---------------------------------------------------------------- original against final
 const pair = (title, note, a, b) => `<div style="display:flex;flex-direction:column;gap:10px"><span style="font-size:14px;font-weight:600">${title}</span>

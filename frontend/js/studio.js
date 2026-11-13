@@ -134,7 +134,7 @@ function showError(m) { $("speak-error").textContent = m; $("speak-error").hidde
 function toIdle() { if (S.phase !== "recording") S.phase = "idle"; }     // never ends a recording in progress
 function play() { audio.currentTime = 0; audio.play().then(() => { if (S.phase !== "recording") S.phase = "playing"; render(); }).catch(() => { toIdle(); render(); }); }
 audio.onended = () => { toIdle(); $("time").textContent = `${fmt(S.duration)} / ${fmt(S.duration)}`; render(); };
-$("play").onclick = () => { if (S.phase === "playing") { audio.pause(); S.phase = "idle"; render(); } else if (S.hasAudio) { audio.play(); S.phase = "playing"; render(); } };
+$("play").onclick = () => { if (S.phase === "recording") return; if (S.phase === "playing") { audio.pause(); S.phase = "idle"; render(); } else if (S.hasAudio) { audio.play(); S.phase = "playing"; render(); } };
 
 // ---------------------------------------------------------------- the page's words and buttons
 function loadingText() {
@@ -159,14 +159,14 @@ function render() {
     : speaking ? `Speaking in ${v.label}…` : playing ? `Playing ${v.label}`
     : S.hasAudio ? "Done. Play it again or download it."
     : S.voice === "mine" ? "Your voice is ready. Press Speak." : "Ready. Type something and press Speak.";
-  $("play").disabled = !S.hasAudio;
+  $("play").disabled = !S.hasAudio || S.phase === "recording";
   $("play").setAttribute("aria-label", playing ? "Pause" : "Play");
   $("icon-play").hidden = playing; $("icon-pause").hidden = !playing;
   if (!S.hasAudio) $("time").textContent = "0:00";
 }
 
 // ---------------------------------------------------------------- add your voice
-const P = { tab: "record", samples: null, result: null, stream: null, recorder: null, analyser: null, ctx: null, opener: null };
+const P = { op: 0, acquiring: false, tab: "record", result: null, stream: null, recorder: null, analyser: null, ctx: null, opener: null };
 function openPanel(e) {
   P.opener = e && e.currentTarget;
   $("panel").hidden = false; $("scrim").hidden = false;
@@ -175,6 +175,7 @@ function openPanel(e) {
 }
 function closePanel() {
   if (S.phase === "recording") stopRecording(true);
+  P.op++;                                                      // anything still decoding or asking for the mic is now stale
   $("panel").hidden = true; $("scrim").hidden = true; render();
   (P.opener && document.contains(P.opener) ? P.opener : $("query")).focus();
 }
@@ -190,25 +191,34 @@ function setTab(t) {
 $("tab-record").onclick = () => { if (S.phase !== "recording") setTab("record"); };
 $("tab-upload").onclick = () => { if (S.phase !== "recording") setTab("upload"); };
 function resetClip() {
-  P.result = null;
+  P.op++; P.result = null;
   $("checks").hidden = true; $("clip-error").hidden = true; $("file-name").hidden = true;
   $("rec-bar").style.width = "0"; $("rec-time").textContent = "0:00 / 0:20"; $("rec-label").textContent = "Start recording";
+  updateUse();
 }
-function clipError(m) { $("clip-error").textContent = m; $("clip-error").hidden = false; }
+function clipError(m, op = P.op) { if (op !== P.op) return; $("clip-error").textContent = m; $("clip-error").hidden = false; }
 
 $("rec").onclick = () => (S.phase === "recording" ? stopRecording(false) : startRecording());
 async function startRecording() {
-  if (S.phase === "recording" || (P.recorder && P.recorder.state === "recording")) return;
+  if (S.phase === "recording" || P.acquiring || (P.recorder && P.recorder.state === "recording")) return;
+  if (S.phase === "speaking") return clipError("Wait for the current sentence to finish, then record.");
   audio.pause();
   resetClip();
+  const op = P.op;
+  P.acquiring = true; $("rec").disabled = true;
+  let stream;
   try {
-    P.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
   } catch (err) {
     clipError(err && err.name === "NotAllowedError"
       ? "Microphone access is blocked. Allow it from the icon in your browser’s address bar, or upload a file instead."
-      : "Couldn’t find a microphone. Plug one in, or upload a file instead.");
+      : "Couldn’t find a microphone. Plug one in, or upload a file instead.", op);
     return;
+  } finally {
+    P.acquiring = false; $("rec").disabled = false;
   }
+  if (op !== P.op || $("panel").hidden || S.phase === "speaking") { stream.getTracks().forEach((t) => t.stop()); return; }
+  P.stream = stream;
   P.ctx = new AudioContext();
   P.analyser = P.ctx.createAnalyser(); P.analyser.fftSize = 2048;
   P.ctx.createMediaStreamSource(P.stream).connect(P.analyser);
@@ -217,8 +227,10 @@ async function startRecording() {
   P.recorder.ondataavailable = (e) => chunks.push(e.data);
   P.recorder.onstop = async () => {
     if (P.discard) return;
-    try { useClip(await decode(await new Blob(chunks).arrayBuffer())); }
-    catch { clipError("Couldn’t read the recording. Try again, or upload a file instead."); }
+    let samples;
+    try { samples = await decode(await new Blob(chunks).arrayBuffer()); }
+    catch { return clipError("Couldn’t read the recording. Try again, or upload a file instead.", op); }
+    await useClip(samples, op);
   };
   P.discard = false;
   P.recorder.start();
@@ -253,10 +265,13 @@ $("file").onchange = async (e) => {
   e.target.value = "";
   if (!f) return;
   resetClip();
+  const op = P.op;
   $("file-name").textContent = f.name; $("file-name").hidden = false;
   if (f.size > 20 * 1024 * 1024) return clipError("That file is over 20 MB. Use a clip under one minute.");
-  try { useClip(await decode(await f.arrayBuffer())); }
-  catch { clipError("Couldn’t read that file. Use a WAV, MP3, M4A or OGG recording."); }
+  let samples;
+  try { samples = await decode(await f.arrayBuffer()); }
+  catch { return clipError("Couldn’t read that file. Use a WAV, MP3, M4A or OGG recording.", op); }
+  await useClip(samples, op);
 };
 
 async function decode(bytes) {                                 // any format the browser can play -> mono, 22,050 Hz, max 60 s
@@ -265,12 +280,16 @@ async function decode(bytes) {                                 // any format the
   const ch = buf.getChannelData(0);
   return ch.slice(0, Math.min(ch.length, 22050 * 60));
 }
-async function useClip(samples) {
-  if (!S.engine) return clipError("The voice models are still loading. Try again in a moment.");
+async function useClip(samples, op) {
+  if (op !== P.op) return;
+  if (!S.engine) return clipError("The voice models are still loading. Try again in a moment.", op);
   const c = clipChecks(samples, 22050);
-  if (c.silent) return clipError("The clip is silent. Check the microphone, then record again.");
-  if (c.speechSeconds < 3) return clipError(`The clip has only ${c.speechSeconds.toFixed(1)} seconds of speech. Record at least 5 seconds in a quiet room.`);
-  const r = await S.engine.embedClip(samples);
+  if (c.silent) return clipError("The clip is silent. Check the microphone, then record again.", op);
+  if (c.speechSeconds < 3) return clipError(`The clip has only ${c.speechSeconds.toFixed(1)} seconds of speech. Record at least 5 seconds in a quiet room.`, op);
+  let r;
+  try { r = await S.engine.embedClip(samples); }
+  catch (err) { console.error(err); return clipError("Couldn’t make a voice from this clip. Try again, or use a different clip.", op); }
+  if (op !== P.op) return;                                     // a newer clip, a reset or a closed panel replaced this one
   P.result = { embedding: r.embedding, secs: Math.round(r.speechSeconds) };
   const items = [
     [true, `${Math.round(c.speechSeconds)} seconds of speech`],
@@ -289,7 +308,7 @@ function updateUse() {
   $("use-hint").textContent = S.phase === "recording" ? "Recording…" : !ready ? (P.tab === "record" ? "Record at least 5 seconds first" : "Choose a file first") : !$("consent").checked ? "Tick the permission box first" : "Ready";
 }
 $("use").onclick = () => {
-  if ($("use").disabled) return;
+  if ($("use").disabled || !P.result) return;
   S.mine = P.result; save("vc-my-voice", S.mine);
   S.voice = "mine"; S.hasAudio = false;
   closePanel(); renderVoices(); render();

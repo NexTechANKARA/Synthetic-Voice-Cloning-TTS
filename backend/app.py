@@ -60,7 +60,35 @@ def load_models():
         log.exception("Model loading failed")
 
 
+class BodyLimit:
+    """Stops reading a request body once it passes `limit` bytes, before FastAPI parses it.
+    Checks the Content-Length header and also counts the bytes actually received."""
+
+    def __init__(self, app, limit):
+        self.app, self.limit = app, limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        too_big = HTTPException(413, "That file is over 20 MB. Use a clip under one minute.")
+        length = dict(scope["headers"]).get(b"content-length", b"")
+        if length.isdigit() and int(length) > self.limit:
+            return await JSONResponse({"error": too_big.detail}, status_code=413)(scope, receive, send)
+        seen = 0
+
+        async def counted():
+            nonlocal seen
+            message = await receive()
+            seen += len(message.get("body", b""))
+            if seen > self.limit:
+                raise too_big                                      # FastAPI passes HTTPException through unchanged
+            return message
+
+        await self.app(scope, counted, send)
+
+
 app = FastAPI(title="Voice Cloner API", docs_url=None, redoc_url=None)
+app.add_middleware(BodyLimit, limit=MAX_UPLOAD_BYTES + 1024 * 1024)   # 1 MB headroom for the form fields
 app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()],
                    allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"],
                    expose_headers=["X-Audio-Seconds"])
@@ -169,6 +197,8 @@ def embed(file: UploadFile = File(...), authorization: str | None = Header(None)
             raise HTTPException(400, "Couldn't read that audio. Upload a WAV, MP3, M4A or OGG file, or record in the browser.")
         if y.size == 0 or not np.isfinite(y).all():
             raise HTTPException(400, "The clip is empty.")
+        if np.abs(y).max() < 0.01:                                # silence: split() would count it all as speech
+            raise HTTPException(400, "The clip is silent. Check the microphone, then record again.")
         speech = sum(int(b - a) for a, b in librosa.effects.split(y, top_db=30)) / SR
         if speech < MIN_SPEECH_S:
             raise HTTPException(400, f"The clip has only {speech:.1f} seconds of speech. Record at least 5 seconds in a quiet room.")

@@ -23,11 +23,15 @@ function start() {
   })(performance.now());
 
   // download the models now so the Studio opens fast; the intro counter shows the real progress
-  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
   const progress = { fraction: 0, mb: "", failed: false };
-  createEngine("models/", { onProgress: (l, t) => { progress.fraction = t ? l / t : 0; progress.mb = `${(l / 1e6).toFixed(0)} of ${(t / 1e6).toFixed(0)} MB`; } })
-    .then(() => { progress.fraction = 1; })
-    .catch(() => { progress.failed = true; });
+  if (typeof ort === "undefined") {
+    progress.failed = true;                                    // the model library didn't load: sign-in still works
+  } else {
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+    createEngine("models/", { onProgress: (l, t) => { progress.fraction = t ? l / t : 0; progress.mb = `${(l / 1e6).toFixed(0)} of ${(t / 1e6).toFixed(0)} MB`; } })
+      .then(() => { progress.fraction = 1; })
+      .catch(() => { progress.failed = true; });
+  }
 
   let seen = false;
   try { seen = sessionStorage.getItem("vc-intro") === "1"; } catch {}
