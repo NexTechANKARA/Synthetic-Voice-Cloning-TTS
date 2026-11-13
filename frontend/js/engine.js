@@ -95,6 +95,11 @@ class Engine {
     const dur = enc.dur.slice(0, chunk.length);
     const parts = sum(dur) > limit ? splitByFrames(chunk, dur, limit - reserve) : [chunk];
     if (parts.length === 1) return [{ h: enc.h, dur: enc.dur, fs: 0, fe: sum(enc.dur), jl: false, jr: false }];
+    if (!chunk.includes(" ")) {                                 // letter pieces of one long word: no context to share
+      const out = [];
+      for (const p of parts) out.push(...(await this.plan(p, spk, pace)));
+      return out;
+    }
     const words = chunk.split(" "), segs = [];
     let a = 0;
     for (const [i, part] of parts.entries()) {
@@ -243,9 +248,17 @@ export function cleanText(s) {
 // Split a chunk at word boundaries into even parts, each under `limit` predicted frames (vc_lib.infer.split_by_frames).
 export function splitByFrames(chunk, durations, limit) {
   const total = durations.reduce((a, b) => a + b, 0);
-  if (total <= limit || !chunk.includes(" ")) return [chunk];
+  if (total <= limit) return [chunk];
   const target = total / Math.ceil(total / limit);
   const parts = [];
+  if (!chunk.includes(" ")) {                                 // one very long "word": cut between letters
+    let cur = "", curFrames = 0;
+    [...chunk].forEach((ch, i) => {
+      if (cur && curFrames + durations[i] / 2 > target) { parts.push(cur); cur = ""; curFrames = 0; }
+      cur += ch; curFrames += durations[i];
+    });
+    return [...parts, cur];
+  }
   let cur = [], curFrames = 0, pos = 0;
   for (const word of chunk.split(" ")) {
     const frames = durations.slice(pos, pos + word.length + 1).reduce((a, b) => a + b, 0);   // the word plus the space after it

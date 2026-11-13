@@ -22,7 +22,8 @@ assert ch[0] == ("hello there", True) and ch[-1][1] is True, ch
 assert abs(infer.word_error_rate("a b c d", "a x c") - 0.5) < 1e-9
 assert infer.split_by_frames("hi everyone over here", [3] * 21, 100) == ["hi everyone over here"]        # fits: unchanged
 assert infer.split_by_frames("hi everyone over here thanks", [3] * 28, 50) == ["hi everyone", "over here thanks"]  # even parts
-assert infer.split_by_frames("supercalifragilistic", [20] * 20, 50) == ["supercalifragilistic"]        # one word: can't split
+assert infer.split_by_frames("supercalifragilistic", [2] * 20, 50) == ["supercalifragilistic"]         # one word that fits
+assert infer.split_by_frames("abcdefgh", [20] * 8, 50) == ["ab", "cd", "ef", "gh"]                   # too long: cut between letters
 y = np.ones(1000, np.float32)
 assert len(infer.crossfade_concat([y, y], 100)) == 1900
 from types import SimpleNamespace as NS

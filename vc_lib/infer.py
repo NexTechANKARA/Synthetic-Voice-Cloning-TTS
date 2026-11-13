@@ -48,9 +48,16 @@ def split_by_frames(chunk, durations, limit=MAX_FRAMES):
     """Split a chunk at word boundaries so that no part needs more than `limit` predicted frames.
     durations: predicted frames per character of `chunk`. Returns [chunk] when it already fits."""
     total = sum(durations)
-    if total <= limit or " " not in chunk:
+    if total <= limit:
         return [chunk]
     target = total / math.ceil(total / limit)                     # even parts, each under the limit
+    if " " not in chunk:                                           # one very long "word": cut between letters
+        parts, cur, cur_frames = [], "", 0
+        for ch, frames in zip(chunk, durations):
+            if cur and cur_frames + frames / 2 > target:
+                parts.append(cur); cur, cur_frames = "", 0
+            cur += ch; cur_frames += frames
+        return parts + [cur]
     parts, cur, cur_frames, pos = [], [], 0, 0
     for word in chunk.split(" "):
         frames = sum(durations[pos:pos + len(word) + 1])          # the word plus the space after it
@@ -151,6 +158,10 @@ class VoicePipeline:
             parts = split_by_frames(chunk, dur, limit - reserve) if sum(dur) > limit else [chunk]
             if len(parts) == 1:
                 segs.append((chunk, 0, sum(dur), pause, (False, False), (h, dur)))
+                continue
+            if " " not in chunk:                              # letter pieces of one long word: no context to share
+                segs += self._plan([(p, pause and k == len(parts) - 1) for k, p in enumerate(parts)],
+                                   speaker_emb, pace, limit)
                 continue
             words, a = chunk.split(" "), 0
             for i, part in enumerate(parts):
