@@ -175,7 +175,7 @@ class VoicePipeline:
                         break
                     if cl >= cr: cl -= 1                      # too long: give up context, largest side first
                     else: cr -= 1
-                if sum(wdur) > limit and " " in part:            # too long even alone: split this part again
+                if sum(wdur) > limit and len(part) > 1:          # too long even alone: split this part again
                     segs += self._plan([(part, pause and i == len(parts) - 1)], speaker_emb, pace, limit)
                     a += n
                     continue

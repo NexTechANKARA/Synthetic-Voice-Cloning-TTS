@@ -111,7 +111,7 @@ class Engine {
         if (sum(w.dur) <= limit || cl + cr === 0) break;
         if (cl >= cr) cl--; else cr--;                       // too long: give up context, largest side first
       }
-      if (sum(w.dur) > limit && part.includes(" ")) {           // too long even alone: split this part again
+      if (sum(w.dur) > limit && part.length > 1) {              // too long even alone: split this part again
         segs.push(...(await this.plan(part, spk, pace)));
         a += n;
         continue;
