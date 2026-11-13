@@ -27,7 +27,7 @@ function save(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catc
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
 ort.env.wasm.proxy = true;                                     // run the models off the main thread so the page stays smooth
 createEngine("models/", { onProgress: (l, t) => { S.loadFraction = t ? l / t : 0; render(); } })
-  .then((e) => { S.engine = e; S.phase = "idle"; renderVoices(); render(); })
+  .then((e) => { S.engine = e; toIdle(); renderVoices(); render(); })
   .catch(() => { S.loadError = true; render(); });
 
 // ---------------------------------------------------------------- stage drawing
@@ -131,8 +131,9 @@ async function speak(override) {
   }
 }
 function showError(m) { $("speak-error").textContent = m; $("speak-error").hidden = false; render(); }
-function play() { audio.currentTime = 0; audio.play().then(() => { S.phase = "playing"; render(); }).catch(() => { S.phase = "idle"; render(); }); }
-audio.onended = () => { S.phase = "idle"; $("time").textContent = `${fmt(S.duration)} / ${fmt(S.duration)}`; render(); };
+function toIdle() { if (S.phase !== "recording") S.phase = "idle"; }     // never ends a recording in progress
+function play() { audio.currentTime = 0; audio.play().then(() => { if (S.phase !== "recording") S.phase = "playing"; render(); }).catch(() => { toIdle(); render(); }); }
+audio.onended = () => { toIdle(); $("time").textContent = `${fmt(S.duration)} / ${fmt(S.duration)}`; render(); };
 $("play").onclick = () => { if (S.phase === "playing") { audio.pause(); S.phase = "idle"; render(); } else if (S.hasAudio) { audio.play(); S.phase = "playing"; render(); } };
 
 // ---------------------------------------------------------------- the page's words and buttons
@@ -197,6 +198,8 @@ function clipError(m) { $("clip-error").textContent = m; $("clip-error").hidden 
 
 $("rec").onclick = () => (S.phase === "recording" ? stopRecording(false) : startRecording());
 async function startRecording() {
+  if (S.phase === "recording" || (P.recorder && P.recorder.state === "recording")) return;
+  audio.pause();
   resetClip();
   try {
     P.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
@@ -239,7 +242,7 @@ function stopRecording(discard) {
   if (P.recorder && P.recorder.state !== "inactive") P.recorder.stop();
   P.stream && P.stream.getTracks().forEach((tr) => tr.stop());
   P.ctx && P.ctx.close();
-  S.phase = S.hasAudio ? "idle" : "idle";
+  S.phase = S.engine ? "idle" : "loading";
   $("rec").setAttribute("aria-pressed", "false"); $("rec-label").textContent = "Record again";
   if (!discard && t < 5) clipError("That was under 5 seconds. Read a little more of the passage and try again.");
   updateUse(); render();
