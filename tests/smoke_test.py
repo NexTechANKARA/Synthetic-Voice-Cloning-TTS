@@ -20,6 +20,9 @@ assert common.clean_text("It's 1999, OK?") == "it's one thousand nine hundred an
 ch = infer.split_text("Hello there, my friend. How are you doing today?", 12)
 assert ch[0] == ("hello there", True) and ch[-1][1] is True, ch
 assert abs(infer.word_error_rate("a b c d", "a x c") - 0.5) < 1e-9
+assert infer.split_by_frames("hi everyone over here", [3] * 21, 100) == ["hi everyone over here"]        # fits: unchanged
+assert infer.split_by_frames("hi everyone over here thanks", [3] * 28, 50) == ["hi everyone", "over here thanks"]  # even parts
+assert infer.split_by_frames("supercalifragilistic", [20] * 20, 50) == ["supercalifragilistic"]        # one word: can't split
 y = np.ones(1000, np.float32)
 assert len(infer.crossfade_concat([y, y], 100)) == 1900
 from types import SimpleNamespace as NS

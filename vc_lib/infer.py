@@ -3,6 +3,7 @@
 The AE cleans reference clips before the VAE turns them into a speaker embedding."""
 import os
 import re
+import math
 import difflib
 import numpy as np
 import torch
@@ -34,6 +35,27 @@ def split_text(text, max_chars):
         pause = phrase.strip()[-1] in ".,!?;:"
         out += [(c, pause and k == len(chunks) - 1) for k, c in enumerate(chunks)]
     return out
+
+
+MAX_FRAMES = 112        # the models were trained on 128-frame clips; past that the decoder's output decays into a hum
+
+
+def split_by_frames(chunk, durations, limit=MAX_FRAMES):
+    """Split a chunk at word boundaries so that no part needs more than `limit` predicted frames.
+    durations: predicted frames per character of `chunk`. Returns [chunk] when it already fits."""
+    total = sum(durations)
+    if total <= limit or " " not in chunk:
+        return [chunk]
+    target = total / math.ceil(total / limit)                     # even parts, each under the limit
+    parts, cur, cur_frames, pos = [], [], 0, 0
+    for word in chunk.split(" "):
+        frames = sum(durations[pos:pos + len(word) + 1])          # the word plus the space after it
+        pos += len(word) + 1
+        if cur and cur_frames + frames / 2 > target:
+            parts.append(" ".join(cur)); cur, cur_frames = [], 0
+        cur.append(word); cur_frames += frames
+    parts.append(" ".join(cur))
+    return parts
 
 
 def trim_silence(w, top_db=35, keep_ms=60):
@@ -102,6 +124,25 @@ class VoicePipeline:
         return self.vae.encode(x)[0].mean(0)
 
     @torch.no_grad()
+    def _split_long_chunks(self, chunks, speaker_emb, pace, limit=MAX_FRAMES):
+        """Predict each chunk's durations and split any chunk that would run past `limit` frames.
+        A part's durations are predicted again (the first word of a chunk is spoken longer), so this repeats
+        until every chunk fits or can't be split further."""
+        out = []
+        for chunk, pause in chunks:
+            ids, mask = encode_text(chunk, self.meta["char2id"])
+            ids, mask = torch.from_numpy(ids)[None].to(device), torch.from_numpy(mask)[None].to(device)
+            h = self.tts.encode(ids, mask, speaker_emb[None])
+            dur = self.tts.predict_durations(h, mask, pace)[0, :len(chunk)].tolist()
+            parts = split_by_frames(chunk, dur, limit)
+            if len(parts) == 1:
+                out.append((chunk, pause))
+            else:
+                out += self._split_long_chunks([(p, pause and k == len(parts) - 1) for k, p in enumerate(parts)],
+                                               speaker_emb, pace, limit)
+        return out
+
+    @torch.no_grad()
     def text_to_mel(self, text, speaker=None, speaker_emb=None, chunk_chars=None, pace=1.0, seed=0):
         """Returns [(mel (80, T) numpy, pause_after)] per phrase, before the vocoder."""
         if speaker_emb is None:
@@ -111,6 +152,8 @@ class VoicePipeline:
         chunks = split_text(text, max_chars)
         if not chunks:
             return []
+        if self.kind == "fastspeech":
+            chunks = self._split_long_chunks(chunks, speaker_emb, pace)
         enc = [encode_text(c, self.meta["char2id"]) for c, _ in chunks]
         ids = torch.from_numpy(np.stack([e[0] for e in enc])).to(device)
         mask = torch.from_numpy(np.stack([e[1] for e in enc])).to(device)

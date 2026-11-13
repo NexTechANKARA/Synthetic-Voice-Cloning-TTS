@@ -62,12 +62,14 @@ class Engine {
     const pieces = [], mels = [], chunks = splitText(text, this.cfg.max_chars);
     for (const [i, [chunk, pause]] of chunks.entries()) {
       onProgress && onProgress(i, chunks.length);
-      const mel = await this.textToMel(chunk, spk, pace, rand);
-      mels.push(mel);
-      const wav = await this.vocode(mel);
-      const t = trimSilence(wav, this.sr, 35);
-      pieces.push(t.length > this.sr / 20 ? t : wav);
-      if (pause) pieces.push(new Float32Array(Math.round(this.sr * 0.15)));
+      const parts = await this.textToMels(chunk, spk, pace, rand);
+      for (const [k, mel] of parts.entries()) {
+        mels.push(mel);
+        const wav = await this.vocode(mel);
+        const t = trimSilence(wav, this.sr, 35);
+        pieces.push(t.length > this.sr / 20 ? t : wav);
+        if (pause && k === parts.length - 1) pieces.push(new Float32Array(Math.round(this.sr * 0.15)));
+      }
     }
     if (!mels.length) return null;
     const T = mels.reduce((a, m) => a + m.T, 0), data = new Float32Array(80 * T);
@@ -76,13 +78,34 @@ class Engine {
     return { audio: normalize(crossfade(pieces, Math.round(this.sr * 0.025))), mel: { data, T } };
   }
 
-  async textToMel(chunk, spk, pace, rand) {
+  // The models were trained on 128-frame clips; past that the decoder's output decays into a hum. So a chunk
+  // that would need more frames is split at word boundaries (vc_lib.infer.split_by_frames) and each part is
+  // predicted again, until every part fits. Returns one mel per part.
+  async textToMels(chunk, spk, pace, rand) {
+    const { h, dur } = await this.encodeChunk(chunk, spk, pace);
+    const limit = this.cfg.max_frames || 112;
+    if (dur.reduce((a, b) => a + b, 0) > limit && chunk.includes(" ")) {
+      const parts = splitByFrames(chunk, dur.slice(0, chunk.length), limit);
+      if (parts.length > 1) {
+        const out = [];
+        for (const p of parts) out.push(...(await this.textToMels(p, spk, pace, rand)));
+        return out;
+      }
+    }
+    return [await this.decodeChunk(h, dur, spk, rand)];
+  }
+
+  async encodeChunk(chunk, spk, pace) {
     const ids = [...chunk].map((c) => BigInt(this.cfg.char2id[c] ?? this.cfg.unk_id));
     if (ids.length < 2) ids.push(BigInt(this.cfg.char2id[" "]));
     const enc = await this.s.tts_encoder.run({ ids: new ort.Tensor("int64", BigInt64Array.from(ids), [1, ids.length]), spk: f32(spk, [1, 64]) });
-    const h = enc.h.data, logd = enc.logd.data, L = ids.length, D = 256;
     // durations: frames per character = round(max(e^logd - 1, 0) * pace), at least 1 (FastSpeechTTS.predict_durations)
-    const dur = Array.from(logd, (v) => Math.max(1, Math.round(Math.max(Math.exp(v) - 1, 0) * pace)));
+    const dur = Array.from(enc.logd.data, (v) => Math.max(1, Math.round(Math.max(Math.exp(v) - 1, 0) * pace)));
+    return { h: enc.h.data, dur };
+  }
+
+  async decodeChunk(h, dur, spk, rand) {
+    const L = dur.length, D = 256;
     let T = Math.min(dur.reduce((a, b) => a + b, 0), 1024);
     T = Math.max(T, 2);
     const x = new Float32Array(T * D);
@@ -186,6 +209,23 @@ export function cleanText(s) {
   s = String(s).toLowerCase().replace(/\d+/g, (d) => " " + numberToWords(Number(d)) + " ");
   return s.replace(/[’‘]/g, "'").replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
 }
+// Split a chunk at word boundaries into even parts, each under `limit` predicted frames (vc_lib.infer.split_by_frames).
+export function splitByFrames(chunk, durations, limit) {
+  const total = durations.reduce((a, b) => a + b, 0);
+  if (total <= limit || !chunk.includes(" ")) return [chunk];
+  const target = total / Math.ceil(total / limit);
+  const parts = [];
+  let cur = [], curFrames = 0, pos = 0;
+  for (const word of chunk.split(" ")) {
+    const frames = durations.slice(pos, pos + word.length + 1).reduce((a, b) => a + b, 0);   // the word plus the space after it
+    pos += word.length + 1;
+    if (cur.length && curFrames + frames / 2 > target) { parts.push(cur.join(" ")); cur = []; curFrames = 0; }
+    cur.push(word); curFrames += frames;
+  }
+  parts.push(cur.join(" "));
+  return parts;
+}
+
 export function splitText(text, maxChars) {
   const out = [];
   for (const phrase of text.trim().split(/(?<=[.,!?;:])\s+|\n+/)) {
