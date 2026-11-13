@@ -21,6 +21,7 @@ import torch.nn as nn
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from vc_lib.common import SR, N_FFT, HOP, N_MELS, SEG, paths, load_meta, tload  # noqa: E402
+from vc_lib import infer  # noqa: E402
 from vc_lib.train_ae import load_ae  # noqa: E402
 from vc_lib.train_vae import load_vae  # noqa: E402
 from vc_lib.train_fastspeech import load_fastspeech  # noqa: E402
@@ -103,7 +104,7 @@ def main():
               for s in meta["train_speakers"] + meta["holdout"] if s in speaker_mean]
     cfg = {
         "sample_rate": SR, "n_fft": N_FFT, "hop": HOP, "n_mels": N_MELS, "seg": SEG,
-        "db_range": meta["db_range"], "char2id": meta["char2id"], "unk_id": 1, "max_chars": 50,
+        "db_range": meta["db_range"], "char2id": meta["char2id"], "unk_id": 1, "max_chars": 200, "max_frames": infer.MAX_FRAMES,
         "diffusion": {"T": sched.T, "alpha_bar": [float(a) for a in sched.alpha_bar.cpu()], "strength": 0.1, "steps": 50},
         "mel_basis": np.round(librosa.filters.mel(sr=SR, n_fft=N_FFT, n_mels=N_MELS), 7).tolist(),
         "voices": voices,

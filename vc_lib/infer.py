@@ -3,6 +3,7 @@
 The AE cleans reference clips before the VAE turns them into a speaker embedding."""
 import os
 import re
+import math
 import difflib
 import numpy as np
 import torch
@@ -21,7 +22,7 @@ def split_text(text, max_chars):
     Returns [(chunk_text, pause_after)]."""
     out = []
     for phrase in re.split(r"(?<=[.,!?;:])\s+|\n+", text.strip()):
-        words = clean_text(phrase).split()
+        words = [w[i:i + max_chars] for w in clean_text(phrase).split() for i in range(0, len(w), max_chars)]
         if not words:
             continue
         chunks, cur = [], ""
@@ -36,13 +37,45 @@ def split_text(text, max_chars):
     return out
 
 
-def trim_silence(w, top_db=35, keep_ms=60):
+MAX_FRAMES = 128        # the models were trained on 128-frame clips; past about 136 the decoder output decays into a hum
+CONTEXT_WORDS = 1       # neighbouring words spoken with each part (and cut away) so the joins sound continuous
+MAX_TEXT_CHARS = 240    # the text encoder's positional encoding covers 256 characters (window = chunk + context)
+CONTEXT_RESERVE = 56    # frames kept free for that context when a chunk is split (a window's first word is
+                        # spoken longer, because the model puts the leading silence on it)
+
+
+def split_by_frames(chunk, durations, limit=MAX_FRAMES):
+    """Split a chunk at word boundaries so that no part needs more than `limit` predicted frames.
+    durations: predicted frames per character of `chunk`. Returns [chunk] when it already fits."""
+    total = sum(durations)
+    if total <= limit:
+        return [chunk]
+    target = total / math.ceil(total / limit)                     # even parts, each under the limit
+    if " " not in chunk:                                           # one very long "word": cut between letters
+        parts, cur, cur_frames = [], "", 0
+        for ch, frames in zip(chunk, durations):
+            if cur and cur_frames + frames / 2 > target:
+                parts.append(cur); cur, cur_frames = "", 0
+            cur += ch; cur_frames += frames
+        return parts + [cur]
+    parts, cur, cur_frames, pos = [], [], 0, 0
+    for word in chunk.split(" "):
+        frames = sum(durations[pos:pos + len(word) + 1])          # the word plus the space after it
+        pos += len(word) + 1
+        if cur and cur_frames + frames / 2 > target:
+            parts.append(" ".join(cur)); cur, cur_frames = [], 0
+        cur.append(word); cur_frames += frames
+    parts.append(" ".join(cur))
+    return parts
+
+
+def trim_silence(w, top_db=35, keep_ms=60, left=True, right=True):
     """Trim leading/trailing silence but keep a short margin, so word endings and soft
-    final consonants (s, t, f) are not cut off."""
+    final consonants (s, t, f) are not cut off. left/right: which ends to trim."""
     import librosa
     _, (a, b) = librosa.effects.trim(w, top_db=top_db)
     keep = int(SR * keep_ms / 1000)
-    return w[max(0, a - keep // 2): min(len(w), b + keep)]
+    return w[max(0, a - keep // 2) if left else 0: min(len(w), b + keep) if right else len(w)]
 
 
 def crossfade_concat(pieces, xfade):
@@ -102,35 +135,98 @@ class VoicePipeline:
         return self.vae.encode(x)[0].mean(0)
 
     @torch.no_grad()
+    def _encode(self, text, speaker_emb, pace):
+        """Encoder output (1, L, D) and predicted frames per character for `text`, at its own length (no
+        padding, so the durations are exactly the ones the plan is built on)."""
+        ids, mask = encode_text(text, self.meta["char2id"], max_len=len(text))
+        ids, mask = torch.from_numpy(ids)[None].to(device), torch.from_numpy(mask)[None].to(device)
+        h = self.tts.encode(ids, mask, speaker_emb[None])
+        return h, self.tts.predict_durations(h, mask, pace)[0].tolist()
+
+    @torch.no_grad()
+    def _plan(self, chunks, speaker_emb, pace, limit=MAX_FRAMES):
+        """Turn phrase chunks into segments the models can say in one go.
+        A chunk that would run past `limit` frames is split at word boundaries into parts. Each part is then
+        spoken together with up to CONTEXT_WORDS neighbouring words on each side, and only the part's own
+        frames are kept (cut in the middle of the word gaps), so a join sounds like the middle of a sentence
+        rather than the end of one and the start of another.
+        Returns [(window_text, frame_start, frame_end, pause_after, (joined_left, joined_right), (h, durations))]."""
+        segs = []
+        for chunk, pause in chunks:
+            h, dur = self._encode(chunk, speaker_emb, pace)
+            reserve = min(int(CONTEXT_RESERVE * max(pace, 1.0)), limit // 2)   # slower speech: longer context words
+            parts = split_by_frames(chunk, dur, limit - reserve) if sum(dur) > limit else [chunk]
+            if len(parts) == 1:
+                segs.append((chunk, 0, sum(dur), pause, (False, False), (h, dur)))
+                continue
+            if " " not in chunk:                              # letter pieces of one long word: no context to share
+                segs += self._plan([(p, pause and k == len(parts) - 1) for k, p in enumerate(parts)],
+                                   speaker_emb, pace, limit)
+                continue
+            words, a = chunk.split(" "), 0
+            for i, part in enumerate(parts):
+                n = part.count(" ") + 1                       # words in this part
+                cl, cr = min(CONTEXT_WORDS, a), min(CONTEXT_WORDS, len(words) - a - n)
+                while True:
+                    ws = words[a - cl:a + n + cr]
+                    window = " ".join(ws)
+                    wh, wdur = self._encode(window, speaker_emb, pace)
+                    if sum(wdur) <= limit or cl + cr == 0:
+                        break
+                    if cl >= cr: cl -= 1                      # too long: give up context, largest side first
+                    else: cr -= 1
+                if sum(wdur) > limit and len(part) > 1:          # too long even alone: split this part again
+                    segs += self._plan([(part, pause and i == len(parts) - 1)], speaker_emb, pace, limit)
+                    a += n
+                    continue
+                cs = len(" ".join(ws[:cl])) + 1 if cl else 0       # first character of the part inside the window
+                ce = cs + len(part)
+                fs = sum(wdur[:cs - 1]) + wdur[cs - 1] // 2 if cl else 0           # middle of the gap before
+                fe = sum(wdur[:ce]) + wdur[ce] // 2 if cr else sum(wdur)            # middle of the gap after
+                # a side that lost its context is a plain cut: it gets trimmed like a chunk end
+                segs.append((window, fs, fe, pause and i == len(parts) - 1, (cl > 0, cr > 0), (wh, wdur)))
+                a += n
+        return segs
+
+    @torch.no_grad()
     def text_to_mel(self, text, speaker=None, speaker_emb=None, chunk_chars=None, pace=1.0, seed=0):
-        """Returns [(mel (80, T) numpy, pause_after)] per phrase, before the vocoder."""
+        """Returns [(mel (80, T) numpy, pause_after, (joined_left, joined_right))] per segment, before the
+        vocoder. A joined side continues straight into its neighbour (no silence to trim there)."""
         if speaker_emb is None:
             speaker_emb = self.speaker_mean[speaker or self.meta["train_speakers"][0]]
         speaker_emb = speaker_emb.to(device)
-        max_chars = chunk_chars or (50 if self.kind == "fastspeech" else self.meta["chunk_chars"])
+        max_chars = chunk_chars or (200 if self.kind == "fastspeech" else self.meta["chunk_chars"])   # length is handled in _plan
+        max_chars = min(max_chars, MAX_TEXT_CHARS)
         chunks = split_text(text, max_chars)
         if not chunks:
             return []
-        enc = [encode_text(c, self.meta["char2id"]) for c, _ in chunks]
-        ids = torch.from_numpy(np.stack([e[0] for e in enc])).to(device)
-        mask = torch.from_numpy(np.stack([e[1] for e in enc])).to(device)
-        spk = speaker_emb.unsqueeze(0).expand(len(chunks), -1).contiguous()
         if self.kind == "fastspeech":
-            coarse, lengths = self.tts.infer(ids, mask, spk, pace=pace)
-            T = coarse.size(-1)
-            pad = (-T) % 4                                     # the diffusion U-Net halves time twice
-            if pad:
-                coarse = torch.nn.functional.pad(coarse, (0, pad))
+            segs = self._plan(chunks, speaker_emb, pace)
+            # decode every window with exactly the durations the plan was built on (no padding in the encoder)
+            T = max(min(sum(d), 1024) for *_, (_, d) in segs)
+            T += (-T) % 4                                      # the diffusion U-Net halves time twice
+            coarse, lengths = [], []
+            for *_, (h, d) in segs:
+                d = torch.tensor([d], device=device, dtype=torch.long)
+                m, fm = self.tts.decode(h, d, speaker_emb[None], max_len=T)
+                coarse.append(m); lengths.append(int(fm.sum()))
+            coarse = torch.cat(coarse).unsqueeze(1)            # (N, 1, 80, T), silence after each window
         else:
-            coarse = self.tts(ids, mask, spk)
-            lengths = torch.full((len(chunks),), coarse.size(-1), device=device)
+            segs = [(c, 0, None, pause, (False, False), None) for c, pause in chunks]
+            enc = [encode_text(c, self.meta["char2id"]) for c, _ in chunks]
+            ids = torch.from_numpy(np.stack([e[0] for e in enc])).to(device)
+            mask = torch.from_numpy(np.stack([e[1] for e in enc])).to(device)
+            coarse = self.tts(ids, mask, speaker_emb.unsqueeze(0).expand(len(chunks), -1).contiguous())
+            lengths = [coarse.size(-1)] * len(chunks)
+        spk = speaker_emb.unsqueeze(0).expand(len(segs), -1).contiguous()
         strength = self.strength if self.kind == "fastspeech" else 1.0
         mel = ddim_sample(self.diff, self.sched, coarse, spk, self.steps, self.cfg, seed=seed, strength=strength) \
             if self.use_diffusion else coarse
         out = []
-        for j, (_, has_pause) in enumerate(chunks):
-            n = int(lengths[j])
-            out.append((mel[j, 0, :, :n].float().cpu().numpy(), has_pause))
+        for j, (_, fs, fe, has_pause, joined, _) in enumerate(segs):
+            n = lengths[j]
+            fe = n if fe is None else min(fe, n)
+            out.append((mel[j, 0, :, fs:fe].float().cpu().numpy(), has_pause, joined))
         return out
 
     @torch.no_grad()
@@ -143,11 +239,15 @@ class VoicePipeline:
             return np.zeros(0, dtype=np.float32)
         pieces, pause = [], np.zeros(int(SR * pause_ms / 1000), dtype=np.float32)
         tail = 12                                     # silent frames so the vocoder can finish the last sound
-        for m, has_pause in mels:
+        for m, has_pause, (jl, jr) in mels:
             m = np.pad(m, ((0, 0), (2, tail)))
             x = torch.from_numpy(m)[None, None].to(device)
             w = self.G(x).squeeze().cpu().numpy()
-            t = trim_silence(w, trim_db)
+            if jl:                                    # joined sides: cut exactly at the frame, keep no padding
+                w = w[2 * HOP:]
+            if jr:
+                w = w[:len(w) - tail * HOP]
+            t = trim_silence(w, trim_db, left=not jl, right=not jr)
             pieces.append(t if len(t) > SR // 20 else w)
             if has_pause:
                 pieces.append(pause)

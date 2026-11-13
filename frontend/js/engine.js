@@ -59,15 +59,22 @@ class Engine {
     const spk = Float32Array.from(embedding);
     const pace = 1 / Math.min(Math.max(speed, 0.75), 1.33);
     const rand = gaussian(seed);
-    const pieces = [], mels = [], chunks = splitText(text, this.cfg.max_chars);
+    const pieces = [], mels = [], chunks = splitText(text, Math.min(this.cfg.max_chars, 240));
+    const hop = this.cfg.hop;
     for (const [i, [chunk, pause]] of chunks.entries()) {
       onProgress && onProgress(i, chunks.length);
-      const mel = await this.textToMel(chunk, spk, pace, rand);
-      mels.push(mel);
-      const wav = await this.vocode(mel);
-      const t = trimSilence(wav, this.sr, 35);
-      pieces.push(t.length > this.sr / 20 ? t : wav);
-      if (pause) pieces.push(new Float32Array(Math.round(this.sr * 0.15)));
+      const segs = await this.plan(chunk, spk, pace);
+      for (const [k, seg] of segs.entries()) {
+        const mel = await this.decodeChunk(seg.h, seg.dur, spk, rand, seg.fs, seg.fe);
+        mels.push(mel);
+        let wav = await this.vocode(mel);
+        // a joined side continues straight into its neighbour: cut exactly at the frame, keep no padding
+        if (seg.jl) wav = wav.subarray(2 * hop);
+        if (seg.jr) wav = wav.subarray(0, wav.length - 12 * hop);
+        const t = trimSilence(wav, this.sr, 35, 60, !seg.jl, !seg.jr);
+        pieces.push(t.length > this.sr / 20 ? t : wav);
+        if (pause && k === segs.length - 1) pieces.push(new Float32Array(Math.round(this.sr * 0.15)));
+      }
     }
     if (!mels.length) return null;
     const T = mels.reduce((a, m) => a + m.T, 0), data = new Float32Array(80 * T);
@@ -76,19 +83,71 @@ class Engine {
     return { audio: normalize(crossfade(pieces, Math.round(this.sr * 0.025))), mel: { data, T } };
   }
 
-  async textToMel(chunk, spk, pace, rand) {
+  // The models were trained on 128-frame clips; past that the decoder's output decays into a hum. So a chunk
+  // that would need more frames is split at word boundaries into parts (vc_lib.infer.split_by_frames). Each
+  // part is spoken together with a neighbouring word on each side, and only the part's own frames are kept
+  // (cut in the middle of the word gaps), so a join sounds like the middle of a sentence. Mirrors infer._plan.
+  // Returns [{ h, dur, fs, fe, jl, jr }]: the window's encoding, the frames to keep, and which sides are joins.
+  async plan(chunk, spk, pace) {
+    const sum = (a) => a.reduce((x, y) => x + y, 0);
+    const limit = this.cfg.max_frames || 128, ctxWords = 1, reserve = Math.min(Math.floor(56 * Math.max(pace, 1)), Math.floor(limit / 2));
+    const enc = await this.encodeChunk(chunk, spk, pace);
+    const dur = enc.dur.slice(0, chunk.length);
+    const parts = sum(dur) > limit ? splitByFrames(chunk, dur, limit - reserve) : [chunk];
+    if (parts.length === 1) return [{ h: enc.h, dur: enc.dur, fs: 0, fe: sum(enc.dur), jl: false, jr: false }];
+    if (!chunk.includes(" ")) {                                 // letter pieces of one long word: no context to share
+      const out = [];
+      for (const p of parts) out.push(...(await this.plan(p, spk, pace)));
+      return out;
+    }
+    const words = chunk.split(" "), segs = [];
+    let a = 0;
+    for (const [i, part] of parts.entries()) {
+      const n = part.split(" ").length;
+      let cl = Math.min(ctxWords, a), cr = Math.min(ctxWords, words.length - a - n), ws, w;
+      for (;;) {
+        ws = words.slice(a - cl, a + n + cr);
+        w = await this.encodeChunk(ws.join(" "), spk, pace);
+        if (sum(w.dur) <= limit || cl + cr === 0) break;
+        if (cl >= cr) cl--; else cr--;                       // too long: give up context, largest side first
+      }
+      if (sum(w.dur) > limit && part.length > 1) {              // too long even alone: split this part again
+        segs.push(...(await this.plan(part, spk, pace)));
+        a += n;
+        continue;
+      }
+      const wdur = w.dur, cs = cl ? ws.slice(0, cl).join(" ").length + 1 : 0, ce = cs + part.length;
+      const fs = cl ? sum(wdur.slice(0, cs - 1)) + Math.floor(wdur[cs - 1] / 2) : 0;        // middle of the gap before
+      const fe = cr ? sum(wdur.slice(0, ce)) + Math.floor(wdur[ce] / 2) : sum(wdur);          // middle of the gap after
+      segs.push({ h: w.h, dur: wdur, fs, fe, jl: cl > 0, jr: cr > 0 });  // a side that lost its context is trimmed like a chunk end
+      a += n;
+    }
+    return segs;
+  }
+
+  async encodeChunk(chunk, spk, pace) {
     const ids = [...chunk].map((c) => BigInt(this.cfg.char2id[c] ?? this.cfg.unk_id));
     if (ids.length < 2) ids.push(BigInt(this.cfg.char2id[" "]));
     const enc = await this.s.tts_encoder.run({ ids: new ort.Tensor("int64", BigInt64Array.from(ids), [1, ids.length]), spk: f32(spk, [1, 64]) });
-    const h = enc.h.data, logd = enc.logd.data, L = ids.length, D = 256;
     // durations: frames per character = round(max(e^logd - 1, 0) * pace), at least 1 (FastSpeechTTS.predict_durations)
-    const dur = Array.from(logd, (v) => Math.max(1, Math.round(Math.max(Math.exp(v) - 1, 0) * pace)));
+    const dur = Array.from(enc.logd.data, (v) => Math.max(1, Math.round(Math.max(Math.exp(v) - 1, 0) * pace)));
+    return { h: enc.h.data, dur };
+  }
+
+  // Decodes a window and keeps frames fs..fe of the result.
+  async decodeChunk(h, dur, spk, rand, fs = 0, fe = Infinity) {
+    const L = dur.length, D = 256;
     let T = Math.min(dur.reduce((a, b) => a + b, 0), 1024);
     T = Math.max(T, 2);
     const x = new Float32Array(T * D);
     for (let i = 0, f = 0; i < L && f < T; i++) for (let k = 0; k < dur[i] && f < T; k++, f++) x.set(h.subarray(i * D, i * D + D), f * D);
     const coarse = (await this.s.tts_decoder.run({ x: new ort.Tensor("float32", x, [1, T, D]), spk: f32(spk, [1, 64]) })).mel.data;   // (80, T)
-    return this.refine(coarse, T, spk, rand);
+    const mel = await this.refine(coarse, T, spk, rand);
+    fe = Math.min(fe, T);
+    if (fs === 0 && fe === T) return mel;
+    const n = fe - fs, data = new Float32Array(80 * n);
+    for (let r = 0; r < 80; r++) data.set(mel.data.subarray(r * T + fs, r * T + fe), r * n);
+    return { data, T: n };
   }
 
   // Shallow diffusion (DiffSinger): noise the coarse mel to step strength*T, then a few DDIM steps back.
@@ -186,10 +245,36 @@ export function cleanText(s) {
   s = String(s).toLowerCase().replace(/\d+/g, (d) => " " + numberToWords(Number(d)) + " ");
   return s.replace(/[’‘]/g, "'").replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
 }
+// Split a chunk at word boundaries into even parts, each under `limit` predicted frames (vc_lib.infer.split_by_frames).
+export function splitByFrames(chunk, durations, limit) {
+  const total = durations.reduce((a, b) => a + b, 0);
+  if (total <= limit) return [chunk];
+  const target = total / Math.ceil(total / limit);
+  const parts = [];
+  if (!chunk.includes(" ")) {                                 // one very long "word": cut between letters
+    let cur = "", curFrames = 0;
+    [...chunk].forEach((ch, i) => {
+      if (cur && curFrames + durations[i] / 2 > target) { parts.push(cur); cur = ""; curFrames = 0; }
+      cur += ch; curFrames += durations[i];
+    });
+    return [...parts, cur];
+  }
+  let cur = [], curFrames = 0, pos = 0;
+  for (const word of chunk.split(" ")) {
+    const frames = durations.slice(pos, pos + word.length + 1).reduce((a, b) => a + b, 0);   // the word plus the space after it
+    pos += word.length + 1;
+    if (cur.length && curFrames + frames / 2 > target) { parts.push(cur.join(" ")); cur = []; curFrames = 0; }
+    cur.push(word); curFrames += frames;
+  }
+  parts.push(cur.join(" "));
+  return parts;
+}
+
 export function splitText(text, maxChars) {
   const out = [];
   for (const phrase of text.trim().split(/(?<=[.,!?;:])\s+|\n+/)) {
-    const words = cleanText(phrase).split(" ").filter(Boolean);
+    // a word longer than maxChars is cut into pieces that fit (the text encoder has 256 positions)
+    const words = cleanText(phrase).split(" ").filter(Boolean).flatMap((w) => w.match(new RegExp(`.{1,${maxChars}}`, "g")));
     if (!words.length) continue;
     const chunks = [];
     let cur = "";
@@ -228,13 +313,13 @@ function frameDb(y, frame = 2048, hop = 512) {                 // librosa.featur
   return db;
 }
 // librosa.effects.trim, keeping keepMs of margin like vc_lib.infer.trim_silence (0 = plain trim)
-export function trimSilence(y, sr, topDb, keepMs = 60) {
+export function trimSilence(y, sr, topDb, keepMs = 60, left = true, right = true) {
   const db = frameDb(y);
   let first = -1, last = -1;
   db.forEach((v, i) => { if (v > -topDb) { if (first < 0) first = i; last = i; } });
   if (first < 0) return new Float32Array(0);
   const a = first * 512, b = Math.min(y.length, (last + 1) * 512), keep = Math.round((sr * keepMs) / 1000);
-  return y.slice(Math.max(0, a - Math.floor(keep / 2)), Math.min(y.length, b + keep));
+  return y.slice(left ? Math.max(0, a - Math.floor(keep / 2)) : 0, right ? Math.min(y.length, b + keep) : y.length);
 }
 function speechLength(y, sr, topDb) {                          // seconds of non-silent audio (librosa.effects.split)
   const db = frameDb(y);
